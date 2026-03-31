@@ -63,28 +63,3 @@ class AnthropicProvider(BaseProvider):
         )
 
         return GenerationResult(content=content, token_usage=token_usage)
-
-    async def stream_generate(
-        self,
-        prompt: Prompt,
-        config: GenerationConfig
-    ) -> AsyncIterator[str]:
-        """流式生成内容
-
-        Args:
-            prompt: 提示词
-            config: 生成配置
-
-        Yields:
-            生成的文本片段
-        """
-        # 调用 Anthropic API 流式接口
-        with self.client.messages.stream(
-            model=config.model,
-            temperature=config.temperature,
-            max_tokens=config.max_tokens,
-            system=prompt.system,
-            messages=prompt.to_messages()
-        ) as stream:
-            for text in stream.text_stream:
-                yield text
