@@ -24,6 +24,11 @@ import { useRouter } from 'vue-router'
 import { knowledgeApi } from '../api/knowledge'
 import GraphChart from './charts/GraphChart.vue'
 import { convertGraph, type VisNode, type VisEdge, type EChartsGraphData, type EChartsNode } from '../utils/visToEcharts'
+import {
+  tripleStringAttrs,
+  locationImportanceZh,
+  locationTypeZh,
+} from '../utils/knowledgeFactDisplay'
 
 const props = defineProps<{ slug: string }>()
 const emit = defineEmits<{
@@ -119,8 +124,9 @@ const buildVisData = () => {
     // 只处理地点类型的三元组
     if (f.entity_type !== 'location') continue
 
+    const a = tripleStringAttrs(f)
     const sid = entityId(f.subject, f.importance, f.location_type, f)
-    const oid = entityId(f.object)
+    const oid = entityId(f.object, a.object_importance, a.object_location_type, f)
 
     if (!nodeSeen.has(sid)) {
       nodeSeen.add(sid)
@@ -128,10 +134,12 @@ const buildVisData = () => {
       const importance = labelToImportance.get(lab) || f.importance
       const locationType = labelToType.get(lab) || f.location_type
       const fact = labelToFact.get(lab)
+      const izh = locationImportanceZh(importance)
+      const tzh = locationTypeZh(locationType)
       nodes.push({
         id: sid,
         label: lab.length > 42 ? `${lab.slice(0, 40)}…` : lab,
-        title: lab + (importance ? `\n重要程度: ${importance}` : '') + (locationType ? `\n类型: ${locationType}` : ''),
+        title: [lab, izh && `重要程度：${izh}`, tzh && `类型：${tzh}`, f.description].filter(Boolean).join('\n'),
         color: getColorByImportance(importance),
         font: { size: 14 },
         shape: getShapeByType(locationType),
@@ -152,18 +160,24 @@ const buildVisData = () => {
     if (!nodeSeen.has(oid)) {
       nodeSeen.add(oid)
       const lab = (f.object || '').trim() || '（空）'
+      const oimp = labelToImportance.get(lab) || a.object_importance
+      const olt = labelToType.get(lab) || a.object_location_type
+      const oizh = locationImportanceZh(oimp)
+      const otz = locationTypeZh(olt)
       nodes.push({
         id: oid,
         label: lab.length > 42 ? `${lab.slice(0, 40)}…` : lab,
-        title: lab,
-        color: { background: '#e0e7ff', border: '#6366f1' },
+        title: [lab, oizh && `重要程度：${oizh}`, otz && `类型：${otz}`].filter(Boolean).join('\n'),
+        color: getColorByImportance(oimp),
         font: { size: 13 },
+        shape: getShapeByType(olt),
+        borderWidth: 2,
       })
     }
 
     const pred = (f.predicate || '').trim() || '—'
     const ch = f.chapter_id != null && f.chapter_id >= 1 ? `第${f.chapter_id}章` : ''
-    const tip = [pred, f.note, ch].filter(Boolean).join('\n')
+    const tip = [pred, f.note, f.description, ch].filter(Boolean).join('\n')
     edges.push({
       id: f.id,
       from: sid,

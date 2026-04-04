@@ -220,9 +220,8 @@ def get_cast_service() -> CastService:
         CastService 实例
     """
     storage = get_storage()
-    # Determine storage root based on storage base path
     storage_root = storage.base_path
-    return CastService(storage_root)
+    return CastService(storage_root, knowledge_repository=get_knowledge_repository())
 
 
 def get_knowledge_service() -> KnowledgeService:

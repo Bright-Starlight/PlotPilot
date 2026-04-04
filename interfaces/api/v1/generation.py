@@ -573,6 +573,9 @@ async def plan_novel(
                 detail=f"Novel {novel_id} not found"
             )
 
+        # 保证至少有一幕，否则 add_chapter 无法把章节挂到 story_nodes，左侧叙事结构树会一直为空
+        novel_service.ensure_default_act_for_chapters(novel_id)
+
         chapters_planned = 0
         for chapter_num in range(1, 6):
             try:

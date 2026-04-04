@@ -12,6 +12,21 @@ from infrastructure.persistence.database.triple_repository import TripleReposito
 logger = logging.getLogger(__name__)
 
 
+def _map_location_kind(raw_type: str) -> str:
+    t = str(raw_type or "")
+    if "城" in t:
+        return "city"
+    if any(k in t for k in ("区域", "域", "境", "荒", "谷", "原", "山脉")):
+        return "region"
+    if any(k in t for k in ("建筑", "楼", "殿", "阁", "府", "宫", "塔")):
+        return "building"
+    if any(k in t for k in ("势力", "宗", "门", "派", "盟", "族")):
+        return "faction"
+    if any(k in t for k in ("特殊", "秘境", "领域", "遗迹", "墟")):
+        return "realm"
+    return "region"
+
+
 def stable_containment_triple_id(novel_id: str, bible_location_id: str) -> str:
     return str(
         uuid.uuid5(
@@ -35,9 +50,13 @@ class BibleLocationTripleSyncService:
             name = str(raw.get("name") or "").strip()
             p = raw.get("parent_id")
             parent_id = str(p).strip() if isinstance(p, str) and str(p).strip() else None
-            normalized.append({"id": lid, "name": name, "parent_id": parent_id})
+            loc_type = str(raw.get("type") or raw.get("location_type") or "").strip()
+            normalized.append(
+                {"id": lid, "name": name, "parent_id": parent_id, "type": loc_type}
+            )
 
         current_ids = {loc["id"] for loc in normalized}
+        id_to_row = {row["id"]: row for row in normalized}
         inserted = updated = deleted = 0
 
         for row in self._repo.list_bible_generated_containment_with_location_ids(novel_id):
@@ -62,6 +81,10 @@ class BibleLocationTripleSyncService:
             parent_id = loc["parent_id"]
             triple_id = stable_containment_triple_id(novel_id, lid)
             existed = meta is not None and meta.get("source_type") == "bible_generated"
+            parent_row = id_to_row.get(parent_id, {})
+            parent_name = str(parent_row.get("name") or "").strip() or parent_id
+            subj_lt = _map_location_kind(loc.get("type", ""))
+            obj_lt = _map_location_kind(parent_row.get("type", ""))
             triple = Triple(
                 id=triple_id,
                 novel_id=novel_id,
@@ -73,7 +96,15 @@ class BibleLocationTripleSyncService:
                 confidence=1.0,
                 source_type=SourceType.BIBLE_GENERATED,
                 description=loc["name"] or None,
-                attributes={"bible_location_id": lid},
+                attributes={
+                    "bible_location_id": lid,
+                    "subject_label": loc["name"] or lid,
+                    "object_label": parent_name,
+                    "subject_importance": "normal",
+                    "subject_location_type": subj_lt,
+                    "object_importance": "normal",
+                    "object_location_type": obj_lt,
+                },
             )
             self._repo.persist_triple_sync(novel_id, triple)
             if existed:

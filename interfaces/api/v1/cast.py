@@ -1,14 +1,11 @@
 """Cast API routes"""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
 from application.services.cast_service import CastService
 from application.dtos.cast_dto import CastGraphDTO, CastSearchResultDTO, CastCoverageDTO
 from interfaces.api.dependencies import get_cast_service
-from domain.shared.exceptions import EntityNotFoundError
-
-
 router = APIRouter(tags=["cast"])
 
 
@@ -58,9 +55,9 @@ async def get_cast_graph(
 ):
     """获取人物关系图（从三元组自动生成）
 
-    关系图现在从 novel_knowledge.json 的 facts 字段自动提取：
-    - 人物节点：predicate="是" 且 object 包含"主角"、"配角"等关键词
-    - 人物关系：predicate 为"师徒"、"父子"、"朋友"等关系谓词
+    从 SQLite 知识库 triples 读取 facts。
+    - 人物节点：predicate="是" 且宾语含角色词，或 entity_type=character 的主/客体
+    - 人物关系：标准关系谓词，或谓词包含「师徒」「敌对」等子串，或 Bible 人物三元组
 
     Args:
         novel_id: Novel ID
@@ -68,19 +65,11 @@ async def get_cast_graph(
 
     Returns:
         Cast graph DTO（自动生成）
-
-    Raises:
-        HTTPException: If knowledge not found
     """
-    cast_graph = service.get_cast_graph(novel_id)
-    if cast_graph is None:
-        # 尚无 knowledge 文件时返回空图
-        return CastGraphDTO(version=2, characters=[], relationships=[])
-    return cast_graph
+    return service.get_cast_graph(novel_id)
 
 
-# PUT 接口已移除：关系图现在从 novel_knowledge.json 的三元组自动生成
-# 要编辑人物关系，请直接修改 /api/v1/novels/{novel_id}/knowledge 中的 facts 字段
+# PUT 接口已移除：关系图从 SQLite 知识库（GET/PUT /novels/{id}/knowledge）中的 facts 自动生成
 #
 # 人物节点规范：
 # {
@@ -115,13 +104,8 @@ async def search_cast(
     Returns:
         Search results DTO
 
-    Raises:
-        HTTPException: If cast graph not found
     """
-    try:
-        return service.search_cast(novel_id, q)
-    except EntityNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    return service.search_cast(novel_id, q)
 
 
 @router.get("/novels/{novel_id}/cast/coverage", response_model=CastCoverageDTO)
@@ -140,10 +124,5 @@ async def get_cast_coverage(
     Returns:
         Cast coverage DTO
 
-    Raises:
-        HTTPException: If cast graph not found
     """
-    try:
-        return service.get_cast_coverage(novel_id)
-    except EntityNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    return service.get_cast_coverage(novel_id)

@@ -1,10 +1,15 @@
 import { apiClient } from './config'
 
+/** Bible 人物关系：字符串 或 LLM 结构化对象 */
+export type BibleRelationshipEntry =
+  | string
+  | { target?: string; relation?: string; description?: string }
+
 export interface CharacterDTO {
   id: string
   name: string
   description: string
-  relationships: string[]
+  relationships: BibleRelationshipEntry[]
   /** AI 生成时的角色定位（主角/配角等） */
   role?: string
 }

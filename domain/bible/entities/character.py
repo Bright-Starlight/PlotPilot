@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Any
 from domain.shared.base_entity import BaseEntity
 from domain.bible.value_objects.character_id import CharacterId
 from domain.shared.exceptions import InvalidOperationError
@@ -12,7 +12,7 @@ class Character(BaseEntity):
         id: CharacterId,
         name: str,
         description: str,
-        relationships: List[str] = None
+        relationships: List[Any] = None
     ):
         super().__init__(id.value)
         self.character_id = id
@@ -20,8 +20,8 @@ class Character(BaseEntity):
         self.description = description
         self.relationships = relationships or []
 
-    def add_relationship(self, relationship: str) -> None:
-        """添加关系"""
+    def add_relationship(self, relationship: Any) -> None:
+        """添加关系（字符串或结构化 dict，与 Bible JSON / LLM 一致）"""
         if relationship in self.relationships:
             raise InvalidOperationError(f"Relationship already exists: {relationship}")
         self.relationships.append(relationship)

@@ -115,9 +115,9 @@ const initializeStructure = async () => {
 
     if (res.success) {
       message.success(res.message || '第一幕已创建')
-      // 重新加载树
       const treeRes = await structureApi.getTree(props.slug)
-      treeData.value = treeRes.tree.map(convertToTreeNode)
+      const nodes = treeRes.tree?.nodes ?? (Array.isArray(treeRes.tree) ? treeRes.tree : [])
+      treeData.value = nodes.map(convertToTreeNode)
     } else {
       message.warning(res.message || '结构已存在')
     }

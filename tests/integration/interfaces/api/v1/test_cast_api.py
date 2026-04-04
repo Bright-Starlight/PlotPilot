@@ -6,7 +6,6 @@ from pathlib import Path
 from infrastructure.persistence.storage.file_storage import FileStorage
 from infrastructure.persistence.repositories.file_novel_repository import FileNovelRepository
 from infrastructure.persistence.repositories.file_chapter_repository import FileChapterRepository
-from infrastructure.persistence.repositories.file_cast_repository import FileCastRepository
 from application.services.novel_service import NovelService
 from application.services.cast_service import CastService
 from interfaces.api.dependencies import get_novel_service, get_cast_service
@@ -40,11 +39,9 @@ def setup_test_env(tmp_path):
     storage = FileStorage(test_data)
     novel_repo = FileNovelRepository(storage)
     chapter_repo = FileChapterRepository(storage)
-    cast_repo = FileCastRepository(storage)
-
     # Create services
     _test_novel_service = NovelService(novel_repo, chapter_repo)
-    _test_cast_service = CastService(cast_repo, test_data)
+    _test_cast_service = CastService(test_data)
 
     # Override dependencies
     app.dependency_overrides[get_novel_service] = get_test_novel_service

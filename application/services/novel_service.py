@@ -9,7 +9,7 @@ from domain.novel.repositories.novel_repository import NovelRepository
 from domain.novel.repositories.chapter_repository import ChapterRepository
 from domain.shared.exceptions import EntityNotFoundError
 from application.dtos.novel_dto import NovelDTO
-from domain.structure.story_node import StoryNode, NodeType
+from domain.structure.story_node import StoryNode, NodeType, PlanningStatus, PlanningSource
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 
 
@@ -35,6 +35,30 @@ class NovelService:
         self.novel_repository = novel_repository
         self.chapter_repository = chapter_repository
         self.story_node_repository = story_node_repository
+
+    def ensure_default_act_for_chapters(self, novel_id: str) -> None:
+        """若无任何「幕」节点，创建默认第一幕，以便 add_chapter 能挂接章节到叙事结构树。"""
+        if not self.story_node_repository:
+            return
+        tree = self.story_node_repository.get_tree_sync(novel_id)
+        acts = [n for n in tree.nodes if n.node_type == NodeType.ACT]
+        if acts:
+            return
+        act_node = StoryNode(
+            id=f"act-{novel_id}-1",
+            novel_id=novel_id,
+            node_type=NodeType.ACT,
+            number=1,
+            title="第一幕",
+            description="初始规划自动创建，可在结构视图中重命名",
+            parent_id=None,
+            order_index=0,
+            planning_status=PlanningStatus.CONFIRMED,
+            planning_source=PlanningSource.AI_MACRO,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        self.story_node_repository.save_sync(act_node)
 
     def create_novel(
         self,
@@ -159,7 +183,7 @@ class NovelService:
         if self.story_node_repository:
             try:
                 # 查找当前活跃的幕（最新的幕）
-                tree = self.story_node_repository.get_tree(novel_id)
+                tree = self.story_node_repository.get_tree_sync(novel_id)
                 acts = [node for node in tree.nodes if node.node_type == NodeType.ACT]
 
                 if acts:
@@ -183,17 +207,17 @@ class NovelService:
                         updated_at=datetime.now()
                     )
 
-                    self.story_node_repository.save(chapter_node)
+                    self.story_node_repository.save_sync(chapter_node)
 
                     # 更新幕的章节范围
-                    children = self.story_node_repository.get_children(current_act.id, novel_id)
+                    children = self.story_node_repository.get_children_sync(current_act.id)
                     chapter_nodes = [node for node in children if node.node_type == NodeType.CHAPTER]
                     if chapter_nodes:
                         chapter_numbers = [node.number for node in chapter_nodes]
                         current_act.chapter_start = min(chapter_numbers)
                         current_act.chapter_end = max(chapter_numbers)
                         current_act.chapter_count = len(chapter_numbers)
-                        self.story_node_repository.save(current_act)
+                        self.story_node_repository.save_sync(current_act)
 
             except Exception as e:
                 # 如果同步失败，不影响章节创建

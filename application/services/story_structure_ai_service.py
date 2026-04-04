@@ -64,7 +64,7 @@ class StoryStructureAIService:
                 }
 
         # 检查是否已有结构（排除章节节点，只检查幕/卷/部）
-        existing = self.repository.get_tree(novel_id)
+        existing = await self.repository.get_tree(novel_id)
         structure_nodes = [n for n in existing.nodes if n.node_type in [NodeType.PART, NodeType.VOLUME, NodeType.ACT]]
         if structure_nodes:
             logger.info(f"Structure already exists for novel {novel_id}, skipping initialization")

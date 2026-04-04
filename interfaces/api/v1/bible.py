@@ -1,7 +1,7 @@
 """Bible API 路由"""
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from pydantic import BaseModel, Field
-from typing import Optional
+from pydantic import BaseModel, Field, ConfigDict
+from typing import Optional, Union
 import logging
 
 from application.services.bible_service import BibleService
@@ -67,12 +67,25 @@ class AddStyleNoteRequest(BaseModel):
     content: str = Field(..., description="内容")
 
 
+class BibleCharacterRelationshipItem(BaseModel):
+    """Bible 人物关系项（与 LLM 输出的 target/relation/description 对象一致）"""
+
+    model_config = ConfigDict(extra="allow")
+
+    target: Optional[str] = None
+    relation: Optional[str] = None
+    description: Optional[str] = None
+
+
 class CharacterData(BaseModel):
     """人物数据"""
     id: str = Field(..., description="人物 ID")
     name: str = Field(..., description="人物名称")
     description: str = Field(..., description="人物描述")
-    relationships: list[str] = Field(default_factory=list, description="关系列表")
+    relationships: list[Union[str, BibleCharacterRelationshipItem]] = Field(
+        default_factory=list,
+        description="关系列表：字符串或结构化对象",
+    )
 
 
 class WorldSettingData(BaseModel):

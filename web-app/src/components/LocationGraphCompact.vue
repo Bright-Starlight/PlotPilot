@@ -25,6 +25,11 @@ import { knowledgeApi } from '../api/knowledge'
 import GraphChart from './charts/GraphChart.vue'
 import { convertGraph, type VisNode, type VisEdge } from '../utils/visToEcharts'
 import type { EChartsNode, EChartsLink } from '../utils/visToEcharts'
+import {
+  tripleStringAttrs,
+  locationImportanceZh,
+  locationTypeZh,
+} from '../utils/knowledgeFactDisplay'
 
 const props = defineProps<{ slug: string }>()
 const router = useRouter()
@@ -39,6 +44,8 @@ interface KnowledgeTriple {
   entity_type?: string
   importance?: string
   location_type?: string
+  description?: string
+  attributes?: Record<string, unknown>
 }
 
 const loading = ref(false)
@@ -58,16 +65,30 @@ const graph = computed(() => {
   }>()
 
   locationTriples.forEach(t => {
+    const a = tripleStringAttrs(t)
+    const objImp = a.object_importance
+    const objLt = a.object_location_type
     if (!locationMap.has(t.subject)) {
       locationMap.set(t.subject, {
         name: t.subject,
         importance: t.importance,
         location_type: t.location_type,
-        note: t.note
+        note: [t.note, t.description].filter(Boolean).join('\n') || '',
       })
     }
     if (!locationMap.has(t.object)) {
-      locationMap.set(t.object, { name: t.object })
+      locationMap.set(t.object, {
+        name: t.object,
+        importance: objImp,
+        location_type: objLt,
+        note: '',
+      })
+    } else {
+      const cur = locationMap.get(t.object)!
+      const next = { ...cur }
+      if (objImp && !cur.importance) next.importance = objImp
+      if (objLt && !cur.location_type) next.location_type = objLt
+      locationMap.set(t.object, next)
     }
   })
 
@@ -84,7 +105,7 @@ const graph = computed(() => {
     source_id: t.subject,
     target_id: t.object,
     label: t.predicate,
-    note: t.note || '',
+    note: [t.note, t.description].filter(Boolean).join('\n') || '',
   }))
 
   return { locations, relationships }
@@ -126,20 +147,18 @@ const getNodeShape = (locationType?: string) => {
 
 const graphData = computed(() => {
   const visNodes: VisNode[] = graph.value.locations.map(loc => {
-    const importanceLabel = loc.importance === 'core' ? '核心' :
-                           loc.importance === 'important' ? '重要' :
-                           loc.importance === 'normal' ? '一般' : ''
-
-    const typeLabel = loc.location_type === 'city' ? '城市' :
-                     loc.location_type === 'region' ? '区域' :
-                     loc.location_type === 'building' ? '建筑' :
-                     loc.location_type === 'faction' ? '势力' :
-                     loc.location_type === 'realm' ? '领域' : ''
+    const importanceLabel = locationImportanceZh(loc.importance)
+    const typeLabel = locationTypeZh(loc.location_type)
 
     return {
       id: loc.id,
       label: loc.name + (typeLabel ? `\n[${typeLabel}]` : '') + (importanceLabel ? `\n(${importanceLabel})` : ''),
-      title: [loc.name, typeLabel, importanceLabel, loc.note].filter(Boolean).join('\n'),
+      title: [
+        loc.name,
+        importanceLabel && `重要程度：${importanceLabel}`,
+        typeLabel && `类型：${typeLabel}`,
+        loc.note,
+      ].filter(Boolean).join('\n'),
       color: getNodeColor(loc.importance),
       font: { size: 14 },
       shape: getNodeShape(loc.location_type),

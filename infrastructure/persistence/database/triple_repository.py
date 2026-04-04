@@ -56,6 +56,13 @@ def _triple_to_fact_dict(triple: Triple) -> dict:
             pass
 
     attrs = dict(triple.attributes or {})
+    # 展示用名称与列级重要程度/地点类型（由 Bible 等写入 attributes，不落冗余 JSON）
+    subject_label = attrs.pop("subject_label", None)
+    object_label = attrs.pop("object_label", None)
+    subject_importance = attrs.pop("subject_importance", None)
+    subject_location_type = attrs.pop("subject_location_type", None)
+    # object_importance / object_location_type 保留在 attributes 供前端补全客体节点
+
     if triple.subject_type != triple.object_type:
         attrs["object_type"] = triple.object_type
     if triple.source_chapter_id and not str(triple.source_chapter_id).isdigit():
@@ -71,16 +78,19 @@ def _triple_to_fact_dict(triple: Triple) -> dict:
     elif isinstance(fa, str) and fa.strip().isdigit():
         first_app = int(fa.strip())
 
+    subj_text = (subject_label or triple.subject_id or "").strip() or triple.subject_id
+    obj_text = (object_label or triple.object_id or "").strip() or triple.object_id
+
     return {
         "id": triple.id,
-        "subject": triple.subject_id,
+        "subject": subj_text,
         "predicate": triple.predicate,
-        "object": triple.object_id,
+        "object": obj_text,
         "chapter_id": chapter_num,
         "note": "",
         "entity_type": triple.subject_type,
-        "importance": None,
-        "location_type": None,
+        "importance": subject_importance,
+        "location_type": subject_location_type,
         "description": triple.description,
         "first_appearance": first_app,
         "related_chapters": related_ints,

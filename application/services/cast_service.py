@@ -2,8 +2,11 @@
 import logging
 import re
 import json
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Any, TYPE_CHECKING
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from domain.knowledge.repositories.knowledge_repository import KnowledgeRepository
 from domain.cast.aggregates.cast_graph import CastGraph
 from domain.cast.entities.character import Character
 from domain.cast.entities.relationship import Relationship
@@ -11,7 +14,6 @@ from domain.cast.entities.story_event import StoryEvent
 from domain.cast.value_objects.character_id import CharacterId
 from domain.cast.value_objects.relationship_id import RelationshipId
 from domain.novel.value_objects.novel_id import NovelId
-from domain.shared.exceptions import EntityNotFoundError
 from application.dtos.cast_dto import (
     CastGraphDTO,
     CastSearchResultDTO,
@@ -41,39 +43,71 @@ RELATIONSHIP_PREDICATES = {
 }
 
 
+def _knowledge_triple_to_fact_dict(t: Any) -> dict:
+    """将领域 KnowledgeTriple 转为与 JSON facts 相同的 dict 形状。"""
+    return {
+        "id": t.id,
+        "subject": (t.subject or "").strip(),
+        "predicate": (t.predicate or "").strip(),
+        "object": (t.object or "").strip(),
+        "chapter_id": t.chapter_id,
+        "note": t.note or "",
+        "entity_type": t.entity_type,
+        "importance": t.importance,
+        "location_type": t.location_type,
+        "description": t.description,
+        "first_appearance": t.first_appearance,
+        "related_chapters": list(t.related_chapters or []),
+        "tags": list(t.tags or []),
+        "attributes": dict(t.attributes or {}),
+    }
+
+
 class CastService:
     """Cast application service
 
-    从 novel_knowledge.json 的三元组中自动提取人物关系图。
+    从 SQLite 知识库 triples（facts）自动提取人物关系图。
     """
 
-    def __init__(self, storage_root: Path):
+    def __init__(
+        self,
+        storage_root: Path,
+        knowledge_repository: Optional["KnowledgeRepository"] = None,
+    ):
         """Initialize service
 
         Args:
             storage_root: Root path for storage (e.g., ./data)
+            knowledge_repository: 可选；若提供则优先从 SQLite 读取三元组（与前端知识库一致）
         """
         self.storage_root = storage_root
+        self._knowledge_repository = knowledge_repository
 
-    def _load_knowledge(self, novel_id: str) -> Optional[dict]:
-        """加载知识图谱数据
-
-        Args:
-            novel_id: Novel ID
-
-        Returns:
-            Knowledge data dict or None
-        """
-        knowledge_path = self.storage_root / "novels" / novel_id / "novel_knowledge.json"
-        if not knowledge_path.exists():
-            logger.debug(f"Knowledge file not found: {knowledge_path}")
-            return None
-
+    def _load_facts_list(self, novel_id: str) -> List[dict]:
+        """仅从 SQLite 知识库读取 facts（不回退 novel_knowledge.json）。"""
+        if self._knowledge_repository is None:
+            logger.debug("Cast: no knowledge_repository, empty facts for %s", novel_id)
+            return []
         try:
-            return json.loads(knowledge_path.read_text(encoding='utf-8'))
+            sk = self._knowledge_repository.get_by_novel_id(novel_id)
+            if not sk or not sk.facts:
+                return []
+            facts = [_knowledge_triple_to_fact_dict(t) for t in sk.facts]
+            logger.debug("Cast: loaded %s facts from SQLite for %s", len(facts), novel_id)
+            return facts
         except Exception as e:
-            logger.warning(f"Failed to load knowledge from {knowledge_path}: {e}")
-            return None
+            logger.warning("Cast: SQLite knowledge read failed for %s: %s", novel_id, e)
+            return []
+
+    @staticmethod
+    def _predicate_matches_relationship(predicate: str) -> bool:
+        """兼容 Bible/LLM 复合谓词，如「师徒/暧昧」「敌对/竞争」。"""
+        p = (predicate or "").strip()
+        if not p:
+            return False
+        if p in RELATIONSHIP_PREDICATES:
+            return True
+        return any(token in p for token in RELATIONSHIP_PREDICATES)
 
     def _extract_characters_from_facts(self, facts: List[dict]) -> List[Character]:
         """从三元组中提取人物节点
@@ -91,11 +125,38 @@ class CastService:
         # 第一步：识别明确标记为人物的实体
         character_map: Dict[str, Dict] = {}
 
+        role_from_importance = {
+            "primary": "主角",
+            "secondary": "重要配角",
+            "minor": "次要人物",
+        }
+
         for fact in facts:
             subject = fact.get("subject", "").strip()
             predicate = fact.get("predicate", "").strip()
             obj = fact.get("object", "").strip()
             note = fact.get("note", "")
+            desc = (fact.get("description") or "").strip()
+
+            # SQLite Bible 人物关系三元组：entity_type=character，主客体为人名
+            if fact.get("entity_type") == "character":
+                for nm, imp_key in ((subject, fact.get("importance")), (obj, None)):
+                    if not nm:
+                        continue
+                    if nm not in character_map:
+                        character_map[nm] = {
+                            "name": nm,
+                            "role": "",
+                            "traits": "",
+                            "note": "",
+                            "aliases": [],
+                        }
+                    if imp_key and imp_key in role_from_importance and not character_map[nm]["role"]:
+                        character_map[nm]["role"] = role_from_importance[imp_key]
+                    merged = "\n".join(x for x in [note, desc] if x)
+                    if merged and not character_map[nm]["note"]:
+                        character_map[nm]["note"] = merged
+                continue
 
             # 规则1：predicate="是" 且 object 是人物角色
             if predicate == "是" and any(keyword in obj for keyword in CHARACTER_ROLE_KEYWORDS):
@@ -130,13 +191,15 @@ class CastService:
                     else:
                         character_map[subject]["traits"] = obj
 
-        # 第二步：从关系谓词中识别隐含的人物
+        # 第二步：从关系谓词中识别隐含的人物（含复合谓词「师徒/暧昧」等）
         for fact in facts:
+            if fact.get("entity_type") == "character":
+                continue
             subject = fact.get("subject", "").strip()
             predicate = fact.get("predicate", "").strip()
             obj = fact.get("object", "").strip()
 
-            if predicate in RELATIONSHIP_PREDICATES:
+            if self._predicate_matches_relationship(predicate):
                 # subject 和 object 都应该是人物
                 if subject and subject not in character_map:
                     character_map[subject] = {
@@ -198,9 +261,11 @@ class CastService:
             predicate = fact.get("predicate", "").strip()
             obj = fact.get("object", "").strip()
             note = fact.get("note", "")
+            desc = (fact.get("description") or "").strip()
+            full_note = "\n".join(x for x in [note, desc] if x)
 
-            # 只处理关系谓词
-            if predicate not in RELATIONSHIP_PREDICATES:
+            is_bible_char = fact.get("entity_type") == "character"
+            if not is_bible_char and not self._predicate_matches_relationship(predicate):
                 continue
 
             # 检查 subject 和 object 是否都是已识别的人物
@@ -216,7 +281,7 @@ class CastService:
                 source_id=source_char.id,
                 target_id=target_char.id,
                 label=predicate,
-                note=note,
+                note=full_note or note,
                 directed=True,  # 默认有向
                 story_events=[]
             )
@@ -225,33 +290,18 @@ class CastService:
         logger.info(f"→ 从三元组中提取了 {len(relationships)} 条关系")
         return relationships
 
-    def get_cast_graph(self, novel_id: str) -> Optional[CastGraphDTO]:
-        """从三元组自动生成关系图
-
-        Args:
-            novel_id: Novel ID
-
-        Returns:
-            CastGraphDTO if knowledge exists, None otherwise
-        """
+    def get_cast_graph(self, novel_id: str) -> CastGraphDTO:
+        """从三元组自动生成关系图（仅 SQLite 知识库）。"""
         logger.info(f"→ 从三元组生成关系图: novel_id={novel_id}")
 
-        # 加载知识图谱
-        knowledge = self._load_knowledge(novel_id)
-        if knowledge is None:
-            logger.debug(f"Knowledge not found for novel {novel_id}")
-            return None
-
-        facts = knowledge.get("facts", [])
+        facts = self._load_facts_list(novel_id)
         if not facts:
-            logger.debug(f"No facts found for novel {novel_id}")
+            logger.debug(f"No facts for novel {novel_id}")
             return CastGraphDTO(version=2, characters=[], relationships=[])
 
-        # 提取人物和关系
         characters = self._extract_characters_from_facts(facts)
         relationships = self._extract_relationships_from_facts(facts, characters)
 
-        # 构建 CastGraph 领域对象
         cast_graph = CastGraph(
             id=f"cast_{novel_id}",
             novel_id=NovelId(novel_id),
@@ -273,12 +323,8 @@ class CastService:
         Returns:
             CastSearchResultDTO with matching characters and relationships
 
-        Raises:
-            EntityNotFoundError: If cast graph not found
         """
         cast_dto = self.get_cast_graph(novel_id)
-        if cast_dto is None:
-            raise EntityNotFoundError("CastGraph", f"for novel {novel_id}")
 
         # 重建领域对象以使用搜索方法
         characters = []
@@ -329,12 +375,8 @@ class CastService:
         Returns:
             CastCoverageDTO with coverage analysis
 
-        Raises:
-            EntityNotFoundError: If cast graph not found
         """
         cast_dto = self.get_cast_graph(novel_id)
-        if cast_dto is None:
-            raise EntityNotFoundError("CastGraph", f"for novel {novel_id}")
 
         # 查找章节文件
         novel_path = self.storage_root / "novels" / novel_id

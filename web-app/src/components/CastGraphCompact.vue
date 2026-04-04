@@ -25,6 +25,10 @@ import { knowledgeApi } from '../api/knowledge'
 import GraphChart from './charts/GraphChart.vue'
 import { convertGraph, type VisNode, type VisEdge } from '../utils/visToEcharts'
 import type { EChartsNode, EChartsLink } from '../utils/visToEcharts'
+import {
+  tripleStringAttrs,
+  characterImportanceZh,
+} from '../utils/knowledgeFactDisplay'
 
 const props = defineProps<{ slug: string }>()
 const router = useRouter()
@@ -39,6 +43,8 @@ interface KnowledgeTriple {
   entity_type?: string
   importance?: string
   location_type?: string
+  description?: string
+  attributes?: Record<string, unknown>
 }
 
 const loading = ref(false)
@@ -53,11 +59,25 @@ const graph = computed(() => {
   const characterMap = new Map<string, { name: string; importance?: string; note?: string }>()
 
   characterTriples.forEach(t => {
+    const a = tripleStringAttrs(t)
+    const objImp = a.object_importance
+    const noteFromDesc = t.description?.trim()
     if (!characterMap.has(t.subject)) {
-      characterMap.set(t.subject, { name: t.subject, importance: t.importance, note: t.note })
+      characterMap.set(t.subject, {
+        name: t.subject,
+        importance: t.importance,
+        note: [t.note, noteFromDesc].filter(Boolean).join('\n') || '',
+      })
     }
     if (!characterMap.has(t.object)) {
-      characterMap.set(t.object, { name: t.object })
+      characterMap.set(t.object, {
+        name: t.object,
+        importance: objImp,
+        note: '',
+      })
+    } else if (objImp && !characterMap.get(t.object)?.importance) {
+      const cur = characterMap.get(t.object)!
+      characterMap.set(t.object, { ...cur, importance: objImp })
     }
   })
 
@@ -73,7 +93,7 @@ const graph = computed(() => {
     source_id: t.subject,
     target_id: t.object,
     label: t.predicate,
-    note: t.note || '',
+    note: [t.note, t.description].filter(Boolean).join('\n') || '',
   }))
 
   return { characters, relationships }
@@ -97,14 +117,12 @@ const getNodeColor = (importance?: string) => {
 
 const graphData = computed(() => {
   const visNodes: VisNode[] = graph.value.characters.map(c => {
-    const importanceLabel = c.importance === 'primary' ? '主角' :
-                           c.importance === 'secondary' ? '重要配角' :
-                           c.importance === 'minor' ? '次要人物' : ''
+    const importanceLabel = characterImportanceZh(c.importance)
 
     return {
       id: c.id,
       label: c.name + (importanceLabel ? `\n[${importanceLabel}]` : ''),
-      title: [c.name, importanceLabel, c.note].filter(Boolean).join('\n'),
+      title: [c.name, importanceLabel && `重要程度：${importanceLabel}`, c.note].filter(Boolean).join('\n'),
       color: getNodeColor(c.importance),
       font: { size: 14 },
       shape: 'box',

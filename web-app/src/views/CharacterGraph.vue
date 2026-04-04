@@ -16,7 +16,7 @@
     <div class="graph-container">
       <CharacterRelationGraph
         v-if="novelId"
-        :novel-id="novelId"
+        :slug="novelId"
         @loading="loading = $event"
       />
     </div>

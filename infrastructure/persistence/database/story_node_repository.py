@@ -22,8 +22,8 @@ class StoryNodeRepository:
         conn.row_factory = sqlite3.Row
         return conn
 
-    async def save(self, node: StoryNode) -> StoryNode:
-        """保存节点"""
+    def save_sync(self, node: StoryNode) -> StoryNode:
+        """同步保存（供 NovelService 等非 async 调用链使用）。"""
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
@@ -71,6 +71,10 @@ class StoryNodeRepository:
             return node
         finally:
             conn.close()
+
+    async def save(self, node: StoryNode) -> StoryNode:
+        """保存节点"""
+        return self.save_sync(node)
 
     async def update(self, node: StoryNode) -> StoryNode:
         """更新节点"""
@@ -201,8 +205,8 @@ class StoryNodeRepository:
         finally:
             conn.close()
 
-    async def get_by_novel(self, novel_id: str) -> List[StoryNode]:
-        """获取小说的所有节点"""
+    def get_by_novel_sync(self, novel_id: str) -> List[StoryNode]:
+        """同步列出某小说的全部结构节点。"""
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
@@ -216,13 +220,20 @@ class StoryNodeRepository:
         finally:
             conn.close()
 
+    async def get_by_novel(self, novel_id: str) -> List[StoryNode]:
+        """获取小说的所有节点"""
+        return self.get_by_novel_sync(novel_id)
+
+    def get_tree_sync(self, novel_id: str) -> StoryTree:
+        """同步获取结构树（供 NovelService 使用）。"""
+        return StoryTree(novel_id=novel_id, nodes=self.get_by_novel_sync(novel_id))
+
     async def get_tree(self, novel_id: str) -> StoryTree:
         """获取小说的结构树"""
-        nodes = await self.get_by_novel(novel_id)
-        return StoryTree(novel_id=novel_id, nodes=nodes)
+        return self.get_tree_sync(novel_id)
 
-    async def get_children(self, parent_id: str) -> List[StoryNode]:
-        """获取子节点"""
+    def get_children_sync(self, parent_id: str) -> List[StoryNode]:
+        """同步获取子节点。"""
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
@@ -235,6 +246,10 @@ class StoryNodeRepository:
             return [self._row_to_entity(row) for row in rows]
         finally:
             conn.close()
+
+    async def get_children(self, parent_id: str) -> List[StoryNode]:
+        """获取子节点"""
+        return self.get_children_sync(parent_id)
 
     async def get_chapters_by_novel(self, novel_id: str) -> List[StoryNode]:
         """获取小说的所有章节"""

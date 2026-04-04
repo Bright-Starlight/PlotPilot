@@ -16,6 +16,38 @@ from domain.shared.exceptions import EntityNotFoundError
 logger = logging.getLogger(__name__)
 
 
+def _infer_character_importance(char_data: Dict[str, Any]) -> str:
+    """与前端人物关系图 importance 一致：primary / secondary / minor。"""
+    role = str(char_data.get("role") or "").strip()
+    desc_head = str(char_data.get("description") or "")[:160]
+    blob = f"{role}{desc_head}"
+    if "主角" in blob:
+        return "primary"
+    if any(k in blob for k in ("导师", "师父", "宿敌", "反派", "对手", "核心", "幕后")):
+        return "secondary"
+    return "minor"
+
+
+def _map_location_kind(raw_type: str) -> str:
+    """与 KnowledgeTriple.location_type 枚举对齐。"""
+    t = str(raw_type or "")
+    if "城" in t:
+        return "city"
+    if any(k in t for k in ("区域", "域", "境", "荒", "谷", "原", "山脉")):
+        return "region"
+    if any(k in t for k in ("建筑", "楼", "殿", "阁", "府", "宫", "塔")):
+        return "building"
+    if any(k in t for k in ("势力", "宗", "门", "派", "盟", "族")):
+        return "faction"
+    if any(k in t for k in ("特殊", "秘境", "领域", "遗迹", "墟")):
+        return "realm"
+    return "region"
+
+
+def _default_location_importance(_loc_data: Dict[str, Any]) -> str:
+    return "normal"
+
+
 class AutoBibleGenerator:
     """自动 Bible 生成器
 
@@ -718,6 +750,7 @@ JSON 格式：
 
         # 创建人物名称到ID的映射
         name_to_id = {char_data["name"]: char_id for char_id, char_data in character_ids}
+        id_to_char = {cid: data for cid, data in character_ids}
 
         for char_id, char_data in character_ids:
             relationships = char_data.get("relationships", [])
@@ -760,6 +793,9 @@ JSON 格式：
 
                 # 如果找到了目标人物，创建三元组
                 if target_char_id:
+                    target_char = id_to_char.get(target_char_id, {})
+                    subj_imp = _infer_character_importance(char_data)
+                    obj_imp = _infer_character_importance(target_char)
                     triple = Triple(
                         id=f"triple-{uuid.uuid4().hex[:8]}",
                         novel_id=novel_id,
@@ -771,6 +807,12 @@ JSON 格式：
                         confidence=0.9,
                         source_type=SourceType.BIBLE_GENERATED,
                         description=description,
+                        attributes={
+                            "subject_label": char_data["name"],
+                            "object_label": target_name,
+                            "subject_importance": subj_imp,
+                            "object_importance": obj_imp,
+                        },
                         created_at=datetime.now(),
                         updated_at=datetime.now()
                     )
@@ -786,6 +828,7 @@ JSON 格式：
 
         # 创建地点名称到ID的映射
         name_to_id = {loc_data["name"]: loc_id for loc_id, loc_data in location_ids}
+        id_to_loc = {lid: data for lid, data in location_ids}
 
         for loc_id, loc_data in location_ids:
             connections = loc_data.get("connections", [])
@@ -830,6 +873,11 @@ JSON 格式：
 
                 # 如果找到了目标地点，创建三元组
                 if target_loc_id:
+                    target_loc = id_to_loc.get(target_loc_id, {})
+                    subj_lt = _map_location_kind(loc_data.get("type", ""))
+                    obj_lt = _map_location_kind(target_loc.get("type", ""))
+                    subj_imp = _default_location_importance(loc_data)
+                    obj_imp = _default_location_importance(target_loc)
                     triple = Triple(
                         id=f"triple-{uuid.uuid4().hex[:8]}",
                         novel_id=novel_id,
@@ -841,6 +889,14 @@ JSON 格式：
                         confidence=0.9,
                         source_type=SourceType.BIBLE_GENERATED,
                         description=description,
+                        attributes={
+                            "subject_label": loc_data["name"],
+                            "object_label": target_name,
+                            "subject_importance": subj_imp,
+                            "subject_location_type": subj_lt,
+                            "object_importance": obj_imp,
+                            "object_location_type": obj_lt,
+                        },
                         created_at=datetime.now(),
                         updated_at=datetime.now()
                     )

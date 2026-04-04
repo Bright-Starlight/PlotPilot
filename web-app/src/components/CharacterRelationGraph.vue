@@ -22,6 +22,10 @@ import { useRouter } from 'vue-router'
 import { knowledgeApi } from '../api/knowledge'
 import GraphChart from './charts/GraphChart.vue'
 import { convertGraph, type VisNode, type VisEdge, type EChartsGraphData, type EChartsNode } from '../utils/visToEcharts'
+import {
+  tripleStringAttrs,
+  characterImportanceZh,
+} from '../utils/knowledgeFactDisplay'
 
 const props = defineProps<{ slug: string }>()
 const router = useRouter()
@@ -35,6 +39,8 @@ interface Fact {
   note?: string
   entity_type?: 'character' | 'location'
   importance?: 'primary' | 'secondary' | 'minor'
+  description?: string
+  attributes?: Record<string, unknown>
 }
 
 const loading = ref(false)
@@ -81,17 +87,21 @@ const buildVisData = () => {
     // 只处理人物类型的三元组
     if (f.entity_type !== 'character') continue
 
+    const a = tripleStringAttrs(f)
+    const objImp = a.object_importance as 'primary' | 'secondary' | 'minor' | undefined
+
     const sid = entityId(f.subject, f.importance)
-    const oid = entityId(f.object)
+    const oid = entityId(f.object, objImp)
 
     if (!nodeSeen.has(sid)) {
       nodeSeen.add(sid)
       const lab = (f.subject || '').trim() || '（空）'
       const importance = labelToImportance.get(lab) || f.importance
+      const izh = characterImportanceZh(importance)
       nodes.push({
         id: sid,
         label: lab.length > 42 ? `${lab.slice(0, 40)}…` : lab,
-        title: lab + (importance ? `\n重要程度: ${importance}` : ''),
+        title: [lab, izh && `重要程度：${izh}`, f.description].filter(Boolean).join('\n'),
         color: getColorByImportance(importance),
         font: { size: 14 },
         shape: 'box',
@@ -102,18 +112,22 @@ const buildVisData = () => {
     if (!nodeSeen.has(oid)) {
       nodeSeen.add(oid)
       const lab = (f.object || '').trim() || '（空）'
+      const oimp = labelToImportance.get(lab) || objImp
+      const ozh = characterImportanceZh(oimp)
       nodes.push({
         id: oid,
         label: lab.length > 42 ? `${lab.slice(0, 40)}…` : lab,
-        title: lab,
-        color: { background: '#e0e7ff', border: '#6366f1' },
+        title: [lab, ozh && `重要程度：${ozh}`].filter(Boolean).join('\n'),
+        color: getColorByImportance(oimp),
         font: { size: 13 },
+        shape: 'box',
+        borderWidth: 2,
       })
     }
 
     const pred = (f.predicate || '').trim() || '—'
     const ch = f.chapter_id != null && f.chapter_id >= 1 ? `第${f.chapter_id}章` : ''
-    const tip = [pred, f.note, ch].filter(Boolean).join('\n')
+    const tip = [pred, f.note, f.description, ch].filter(Boolean).join('\n')
     edges.push({
       id: f.id,
       from: sid,
