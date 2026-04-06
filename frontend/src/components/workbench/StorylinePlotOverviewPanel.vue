@@ -7,14 +7,32 @@
       </ul>
     </n-alert>
 
+    <n-radio-group v-model:value="spoView" size="small" class="spo-mode-switch">
+      <n-radio-button value="charts">图表概览</n-radio-button>
+      <n-radio-button value="storylines">故事线列表与编辑</n-radio-button>
+      <n-radio-button value="plotArc">情节弧（剧情点）编辑</n-radio-button>
+    </n-radio-group>
+
     <n-spin :show="loading" class="spo-spin">
-      <n-space vertical :size="14" style="width: 100%">
+      <div class="spo-view-body">
+        <n-space v-show="spoView === 'charts'" vertical :size="14" class="spo-view-charts">
         <!-- 迷你甘特：故事线 -->
         <n-card title="故事线覆盖（章节轴示意）" size="small" :bordered="true">
           <template #header-extra>
-            <n-text depth="3" style="font-size: 11px">横轴为章号，色条为线体跨度</n-text>
+            <n-text depth="3" class="spo-card-hint">横轴为章号，色条为线体跨度</n-text>
           </template>
-          <n-empty v-if="storylines.length === 0" description="暂无故事线，展开下方「故事线列表」添加" />
+          <n-empty
+            v-if="storylines.length === 0"
+            class="spo-empty-inline"
+            size="small"
+            description="暂无故事线"
+          >
+            <template #extra>
+              <n-text depth="3" style="font-size: 12px; max-width: 260px; text-align: center">
+                切换到「故事线列表与编辑」添加主线/支线后，此处会显示章节轴示意。
+              </n-text>
+            </template>
+          </n-empty>
           <div v-else class="gantt-wrap">
             <div class="gantt-axis">
               <span>1</span>
@@ -42,11 +60,27 @@
           </div>
         </n-card>
 
-        <!-- 张力曲线 -->
-        <n-card title="情节弧 · 张力曲线" size="small" :bordered="true">
-          <n-empty v-if="plotPoints.length === 0" description="暂无剧情点，展开下方「情节弧编辑」添加" />
+        <!-- 张力曲线（图形容器避免卡片 overflow 裁切网格线） -->
+        <n-card title="情节弧 · 张力曲线" size="small" :bordered="true" class="spo-card--chart">
+          <n-empty
+            v-if="plotPoints.length === 0"
+            class="spo-empty-inline"
+            size="small"
+            description="暂无剧情点"
+          >
+            <template #extra>
+              <n-text depth="3" style="font-size: 12px; max-width: 260px; text-align: center">
+                切换到「情节弧（剧情点）编辑」添加关键剧情点后，此处会显示张力曲线预览。
+              </n-text>
+            </template>
+          </n-empty>
           <div v-else class="chart-wrap">
-            <svg viewBox="0 0 800 200" class="tension-svg">
+            <svg
+              viewBox="0 0 800 200"
+              class="tension-svg"
+              preserveAspectRatio="xMidYMid meet"
+              shape-rendering="geometricPrecision"
+            >
               <line
                 v-for="i in 4"
                 :key="'g' + i"
@@ -86,16 +120,15 @@
             </svg>
           </div>
         </n-card>
+        </n-space>
 
-        <n-collapse :default-expanded-names="['sl', 'pa']">
-          <n-collapse-item title="故事线列表与编辑" name="sl">
-            <StorylinePanel :slug="slug" />
-          </n-collapse-item>
-          <n-collapse-item title="情节弧（剧情点）编辑" name="pa">
-            <PlotArcPanel :slug="slug" />
-          </n-collapse-item>
-        </n-collapse>
-      </n-space>
+        <div v-show="spoView === 'storylines'" class="spo-view-embed">
+          <StorylinePanel :slug="slug" />
+        </div>
+        <div v-show="spoView === 'plotArc'" class="spo-view-embed">
+          <PlotArcPanel :slug="slug" />
+        </div>
+      </div>
     </n-spin>
   </div>
 </template>
@@ -110,6 +143,9 @@ import StorylinePanel from './StorylinePanel.vue'
 import PlotArcPanel from './PlotArcPanel.vue'
 
 const props = defineProps<{ slug: string }>()
+
+type SpoView = 'charts' | 'storylines' | 'plotArc'
+const spoView = ref<SpoView>('charts')
 
 const loading = ref(false)
 const storylines = ref<StorylineDTO[]>([])
@@ -211,18 +247,76 @@ watch(deskTick, () => void load())
   height: 100%;
   min-height: 0;
   overflow-y: auto;
-  padding: 10px 12px 16px;
+  padding: 16px;
+  background: linear-gradient(to bottom, var(--n-color-modal) 0%, rgba(99, 102, 241, 0.02) 100%);
 }
 
 .spo-intro {
   margin-bottom: 12px;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.spo-mode-switch {
+  width: 100%;
+  margin-bottom: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.spo-mode-switch :deep(.n-radio-group) {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+  gap: 4px;
+}
+
+.spo-mode-switch :deep(.n-radio-button) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.spo-mode-switch :deep(.n-radio-button__state-border) {
+  white-space: normal;
+  text-align: center;
+  line-height: 1.25;
+  padding: 6px 8px;
+}
+
+.spo-view-body {
+  width: 100%;
+  min-height: 0;
+}
+
+.spo-view-charts {
+  width: 100%;
+}
+
+.spo-view-embed {
+  width: 100%;
+  min-height: 360px;
+  height: min(65vh, 640px);
+  max-height: 720px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.spo-view-embed :deep(.storyline-panel),
+.spo-view-embed :deep(.plot-arc-panel) {
+  flex: 1;
+  min-height: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
 }
 
 .spo-bullets {
   margin: 0;
-  padding-left: 1.1rem;
+  padding-left: 1.2rem;
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.65;
 }
 
 .spo-spin {
@@ -232,36 +326,47 @@ watch(deskTick, () => void load())
 .gantt-wrap {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  padding: 0;
+  margin: 0;
 }
 
 .gantt-axis {
   display: flex;
   justify-content: space-between;
   font-size: 11px;
+  font-weight: 600;
   color: var(--n-text-color-3);
-  padding: 0 4px 4px;
+  padding: 0 6px 8px;
+  letter-spacing: 0.02em;
 }
 
 .gantt-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 28px;
+  gap: 10px;
+  min-height: 32px;
+  padding: 4px 0;
+  transition: transform 0.2s ease;
+}
+
+.gantt-row:hover {
+  transform: translateX(2px);
 }
 
 .gantt-label {
-  width: 120px;
+  width: 130px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   overflow: hidden;
 }
 
 .gantt-name {
-  font-size: 11px;
-  color: var(--n-text-color-2);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--n-text-color-1);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -269,41 +374,112 @@ watch(deskTick, () => void load())
 
 .gantt-track {
   flex: 1;
-  height: 14px;
-  background: var(--n-color-hover);
-  border-radius: 7px;
+  height: 16px;
+  background: linear-gradient(to right, rgba(24, 160, 88, 0.08), rgba(24, 160, 88, 0.12));
+  border-radius: 8px;
   position: relative;
   min-width: 0;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 .gantt-bar {
   position: absolute;
   top: 2px;
-  height: 10px;
-  border-radius: 5px;
-  background: linear-gradient(90deg, #36ad6a, #18a058);
-  min-width: 4px;
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #36ad6a 0%, #18a058 100%);
+  min-width: 6px;
+  box-shadow: 0 2px 6px rgba(24, 160, 88, 0.3);
+  transition: box-shadow 0.2s ease;
+}
+
+.gantt-bar:hover {
+  box-shadow: 0 3px 10px rgba(24, 160, 88, 0.45);
 }
 
 .chart-wrap {
   width: 100%;
   overflow-x: auto;
+  padding: 4px 0 0;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+/* 曲线卡片：内容区顶对齐，避免出现「未通栏」的视错觉 */
+.spo-panel :deep(.spo-card--chart .n-card__content) {
+  padding-top: 8px !important;
 }
 
 .tension-svg {
   width: 100%;
   max-width: 800px;
   height: auto;
+  min-height: 140px;
   display: block;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.06));
+  margin: 0 auto;
 }
 
-.spo-panel :deep(.storyline-panel),
-.spo-panel :deep(.plot-arc-panel) {
-  background: transparent;
+.spo-card-hint {
+  font-size: 11px;
+  white-space: nowrap;
 }
 
-.spo-panel :deep(.storyline-panel .panel-header),
-.spo-panel :deep(.plot-arc-panel .panel-header) {
-  padding-top: 0;
+.spo-panel :deep(.n-card) {
+  border-radius: 12px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  transition: box-shadow 0.3s ease;
+  /* 不用 overflow:hidden，避免裁切 SVG 网格线与圆角内阴影断线 */
+  overflow: visible;
 }
+
+.spo-panel :deep(.n-card:hover) {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+}
+
+.spo-panel :deep(.n-card-header) {
+  padding: 12px 16px !important;
+  font-weight: 600;
+  border-bottom: 1px solid var(--n-border-color);
+  background: rgba(99, 102, 241, 0.02);
+}
+
+.spo-panel :deep(.n-card-header__main) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spo-panel :deep(.n-card-header__extra) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spo-panel :deep(.n-card__content) {
+  padding: 12px 16px !important;
+}
+
+.spo-panel :deep(.spo-empty-inline.n-empty) {
+  padding: 16px 12px !important;
+  min-height: auto !important;
+}
+
+.spo-panel :deep(.n-empty:not(.spo-empty-inline)) {
+  padding: 24px 16px;
+  min-height: 88px;
+}
+
+.spo-panel :deep(.n-empty__description) {
+  font-size: 13px;
+  color: var(--n-text-color-3);
+}
+
+.spo-panel :deep(.n-button) {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
 </style>

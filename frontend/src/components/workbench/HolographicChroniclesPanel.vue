@@ -15,14 +15,22 @@
       {{ noteText }}
     </n-alert>
 
-    <n-spin :show="loading" class="hc-spin">
-      <div v-if="rows.length === 0 && !loading" class="hc-empty-wrap">
-        <n-empty description="暂无编年节点：可在下方编辑 Bible 剧情时间线，或在后端创建 novel_snapshots">
-          <template #icon><span style="font-size: 40px">🧬</span></template>
-        </n-empty>
-      </div>
+    <n-radio-group v-model:value="hcView" size="small" class="hc-mode-switch">
+      <n-radio-button value="helix">双螺旋概览</n-radio-button>
+      <n-radio-button value="timeline">剧情时间线 · 列表编辑（Bible）</n-radio-button>
+    </n-radio-group>
 
-      <div v-else class="helix-wrap">
+    <div class="hc-view-body">
+      <n-spin v-show="hcView === 'helix'" :show="loading" class="hc-spin">
+        <div v-if="rows.length === 0 && !loading" class="hc-empty-wrap">
+          <n-empty
+            description="暂无编年节点：可切换到「剧情时间线 · 列表编辑」维护 Bible 时间线，或在后端创建 novel_snapshots"
+          >
+            <template #icon><span style="font-size: 40px">🧬</span></template>
+          </n-empty>
+        </div>
+
+        <div v-else class="helix-wrap">
         <div class="helix-header">
           <span class="helix-header-spine">进度</span>
           <span class="helix-header-left">里世界 · 剧情</span>
@@ -83,14 +91,13 @@
         <div class="axis-footer">
           书目已展开至第 <strong>{{ maxChapter }}</strong> 章（章号来自章节表；编年条仅包含有数据的章位）
         </div>
-      </div>
-    </n-spin>
+        </div>
+      </n-spin>
 
-    <n-collapse class="hc-collapse" :default-expanded-names="[]">
-      <n-collapse-item title="剧情时间线 · 列表编辑（Bible）" name="edit">
+      <div v-show="hcView === 'timeline'" class="hc-view-embed">
         <TimelinePanel :slug="slug" />
-      </n-collapse-item>
-    </n-collapse>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -106,6 +113,9 @@ import TimelinePanel from './TimelinePanel.vue'
 const props = defineProps<{ slug: string }>()
 const message = useMessage()
 const dialog = useDialog()
+
+type HcView = 'helix' | 'timeline'
+const hcView = ref<HcView>('helix')
 
 const loading = ref(false)
 const rows = ref<ChronicleRow[]>([])
@@ -184,35 +194,77 @@ watch(chroniclesTick, () => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 10px 12px 12px;
+  padding: 16px;
+  background: linear-gradient(to bottom, var(--n-color-modal) 0%, rgba(99, 102, 241, 0.02) 100%);
 }
 
 .hc-head {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 16px;
+  margin-bottom: 14px;
   flex-shrink: 0;
 }
 
 .hc-title {
-  margin: 0 0 6px;
-  font-size: 15px;
-  font-weight: 600;
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .hc-lead {
   margin: 0;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.6;
   color: var(--n-text-color-3);
-  max-width: 520px;
+  max-width: 540px;
 }
 
 .hc-note {
   flex-shrink: 0;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+}
+
+.hc-mode-switch {
+  width: 100%;
+  margin-bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.hc-mode-switch :deep(.n-radio-group) {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+  gap: 4px;
+}
+
+.hc-mode-switch :deep(.n-radio-button) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.hc-mode-switch :deep(.n-radio-button__state-border) {
+  white-space: normal;
+  text-align: center;
+  line-height: 1.25;
+  padding: 6px 8px;
+}
+
+.hc-view-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .hc-spin {
@@ -221,90 +273,124 @@ watch(chroniclesTick, () => {
   overflow: hidden;
 }
 
+.hc-view-embed {
+  flex: 1;
+  min-height: 360px;
+  height: min(65vh, 640px);
+  max-height: 720px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hc-view-embed :deep(.timeline-panel) {
+  flex: 1;
+  min-height: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+}
+
 .hc-empty-wrap {
-  padding: 24px 0;
+  padding: 32px 0;
 }
 
 .helix-wrap {
   position: relative;
-  max-height: min(52vh, 480px);
+  max-height: min(54vh, 500px);
   overflow-y: auto;
-  padding: 8px 4px 12px;
+  padding: 12px 8px 16px;
   border: 1px solid var(--n-border-color);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--n-color-modal);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
 }
 
 .helix-header {
   display: grid;
-  grid-template-columns: 56px 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: 64px 1fr 1fr;
+  gap: 12px;
   align-items: center;
-  padding: 6px 4px 10px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--n-border-color);
+  padding: 8px 6px 12px;
+  margin-bottom: 6px;
+  border-bottom: 2px solid var(--n-border-color);
   position: sticky;
   top: 0;
   z-index: 2;
   background: var(--n-color-modal);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  color: var(--n-text-color-3);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--n-text-color-2);
 }
 
 .helix-header-spine {
   text-align: center;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .helix-header-left {
   text-align: left;
-  padding-left: 4px;
+  padding-left: 6px;
+  color: #18a058;
 }
 
 .helix-header-right {
   text-align: left;
-  padding-left: 6px;
+  padding-left: 8px;
+  color: #6366f1;
 }
 
 .helix-row {
   display: grid;
-  grid-template-columns: 56px 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: 64px 1fr 1fr;
+  gap: 12px;
   align-items: start;
-  padding: 12px 0;
-  border-bottom: 1px dashed var(--n-border-color);
-  transition: background 0.15s ease;
+  padding: 14px 0;
+  border-bottom: 1px dashed rgba(99, 102, 241, 0.15);
+  transition: all 0.2s ease;
 }
 
 .helix-row--hot {
-  background: rgba(32, 128, 240, 0.06);
+  background: linear-gradient(to right, rgba(24, 160, 88, 0.06), rgba(99, 102, 241, 0.08));
+  border-radius: 8px;
+  padding-left: 6px;
+  padding-right: 6px;
+  margin-left: -6px;
+  margin-right: -6px;
 }
 
 .helix-chapter {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding-top: 4px;
+  gap: 6px;
+  padding-top: 6px;
 }
 
 .helix-dot {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  background: var(--n-primary-color);
-  box-shadow: 0 0 0 3px rgba(32, 128, 240, 0.25);
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2), 0 2px 8px rgba(99, 102, 241, 0.3);
+  transition: all 0.3s ease;
+}
+
+.helix-row--hot .helix-dot {
+  transform: scale(1.2);
+  box-shadow: 0 0 0 6px rgba(99, 102, 241, 0.3), 0 4px 12px rgba(99, 102, 241, 0.5);
 }
 
 .helix-ch-num {
-  font-size: 10px;
-  color: var(--n-text-color-3);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--n-text-color-2);
   writing-mode: vertical-rl;
   text-orientation: mixed;
-  max-height: 72px;
-  line-height: 1.2;
+  max-height: 80px;
+  line-height: 1.3;
 }
 
 .helix-cell {
@@ -312,68 +398,82 @@ watch(chroniclesTick, () => {
 }
 
 .helix-cell--story {
-  border-right: 2px solid rgba(24, 160, 88, 0.35);
-  padding-right: 10px;
+  border-right: 3px solid rgba(24, 160, 88, 0.4);
+  padding-right: 12px;
 }
 
 .helix-cell--snap {
-  padding-left: 6px;
+  padding-left: 8px;
 }
 
 .story-node {
-  margin-bottom: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(24, 160, 88, 0.08);
-  border: 1px solid rgba(24, 160, 88, 0.2);
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(24, 160, 88, 0.08), rgba(24, 160, 88, 0.12));
+  border: 1px solid rgba(24, 160, 88, 0.25);
+  box-shadow: 0 2px 6px rgba(24, 160, 88, 0.1);
+  transition: all 0.2s ease;
+}
+
+.story-node:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(24, 160, 88, 0.2);
 }
 
 .story-title {
   font-size: 13px;
   font-weight: 600;
   margin-top: 6px;
-  line-height: 1.4;
+  line-height: 1.5;
+  color: var(--n-text-color-1);
 }
 
 .story-desc {
   font-size: 12px;
   color: var(--n-text-color-2);
-  margin-top: 4px;
-  line-height: 1.45;
+  margin-top: 5px;
+  line-height: 1.5;
 }
 
 .snap-node {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(99, 102, 241, 0.08);
-  border: 1px solid rgba(99, 102, 241, 0.25);
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(139, 92, 246, 0.12));
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.1);
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.snap-node:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+  border-color: rgba(99, 102, 241, 0.5);
 }
 
 .snap-name {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--n-text-color-1);
 }
 
 .axis-footer {
   font-size: 11px;
   color: var(--n-text-color-3);
-  padding: 10px 8px 4px;
-  border-top: 1px solid var(--n-border-color);
+  padding: 12px 10px 6px;
+  border-top: 2px solid var(--n-border-color);
+  background: linear-gradient(to top, rgba(99, 102, 241, 0.03), transparent);
 }
 
-.hc-collapse {
-  flex-shrink: 0;
-  margin-top: 12px;
-}
-
-.hc-panel :deep(.timeline-panel) {
-  max-height: 420px;
+.hc-panel :deep(.n-alert) {
+  border-radius: 8px;
 }
 </style>
