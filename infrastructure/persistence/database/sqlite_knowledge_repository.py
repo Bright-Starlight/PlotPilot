@@ -301,7 +301,7 @@ class SqliteKnowledgeRepository:
 
     @staticmethod
     def _chapter_number_from_fact(triple: Dict[str, Any]) -> Optional[int]:
-        v = triple.get("chapter_id")
+        v = triple.get("chapter_number")
         if v is None:
             return None
         try:
