@@ -1243,16 +1243,19 @@ defineExpose({ ensureAssistedMode })
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
 }
 
 .editor-body :deep(.n-input) {
-  height: 100%;
+  flex: 1;
+  min-height: 100%;
 }
 
 .editor-body :deep(.n-input__textarea-el) {
   font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.8;
+  resize: none;
 }
 
 .editor-footer {
