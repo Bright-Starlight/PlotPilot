@@ -53,7 +53,7 @@
                 </n-gi>
                 <n-gi>
                   <n-form-item label="章节数">
-                    <n-input-number v-model:value="newBook.chapters" :min="1" :max="100" class="w-full" />
+                    <n-input-number v-model:value="newBook.chapters" :min="1" :max="9999" class="w-full" placeholder="默认 100 章" />
                   </n-form-item>
                 </n-gi>
                 <n-gi>
@@ -320,7 +320,7 @@ const newBook = ref({
   title: '',
   premise: '',
   genre: '',
-  chapters: 5,
+  chapters: 100,  // 默认 100 章
   words: 2500,
 })
 
@@ -405,7 +405,7 @@ const handleCreate = async () => {
     const title = newBook.value.title || newBook.value.premise.substring(0, 20)
     const novelId = `novel-${Date.now()}`
 
-    const targetChapters = showAdvanced.value ? newBook.value.chapters : 10
+    const targetChapters = newBook.value.chapters || 100  // 始终使用用户输入或默认 100
     const payload = {
       novel_id: novelId,
       title: title,
