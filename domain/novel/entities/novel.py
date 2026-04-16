@@ -16,6 +16,7 @@ class NovelStage(str, Enum):
     AUDITING = "auditing"  # 审计：文风、伏笔、图谱
     REVIEWING = "reviewing"  # 旧版兼容
     PAUSED_FOR_REVIEW = "paused_for_review"  # 幕完成，等待人工确认
+    PAUSED_FOR_SEAM_REVIEW = "paused_for_seam_review"  # 接缝复检失败，等待人工修订
     COMPLETED = "completed"
 
 

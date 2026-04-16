@@ -30,7 +30,18 @@ def _normalize_text(value: Any) -> str:
 
 
 def _safe_int(value: Any, default: int) -> int:
-    """尽力从任意值中解析整数，失败时回退默认值。"""
+    """尽力从任意值中解析整数，失败时回退默认值。
+
+    修复：使用正则提取第一个连续整数片段，避免 "12.0" 被解析为 120、
+    "第1/2章" 被解析为 12 等问题。
+
+    Args:
+        value: 待解析的值
+        default: 解析失败时返回的默认值
+
+    Returns:
+        解析出的整数，解析失败则返回默认值
+    """
     if value is None:
         return default
     if isinstance(value, int):
@@ -41,10 +52,11 @@ def _safe_int(value: Any, default: int) -> int:
     try:
         return int(text)
     except (TypeError, ValueError):
-        digits = "".join(ch for ch in text if ch.isdigit())
-        if digits:
+        import re
+        match = re.search(r"-?\d+", text)
+        if match:
             try:
-                return int(digits)
+                return int(match.group(0))
             except ValueError:
                 return default
         return default
@@ -365,6 +377,20 @@ class StateUpdater:
                     logger.debug("StateUpdater 获取章节正文失败: %s", e)
 
             content = (getattr(chapter, "content", "") or "").strip()
+
+            # 正文不可用时，尝试从现有记录保留接缝字段
+            existing_summary = None
+            if not content and self.knowledge_service:
+                try:
+                    existing_knowledge = self.knowledge_service.get_knowledge(novel_id)
+                    if existing_knowledge:
+                        for ch in (existing_knowledge.chapters or []):
+                            if ch.chapter_id == chapter_number:
+                                existing_summary = ch
+                                break
+                except Exception:
+                    pass
+
             if content:
                 paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
                 if paragraphs:
@@ -384,17 +410,29 @@ class StateUpdater:
                 hits = [kw for kw in emotion_keywords if kw in tail]
                 ending_emotion = "、".join(hits[:3]) if hits else tail[:60]
 
-                question_candidates = []
-                for chunk in reversed(paragraphs[-3:] if paragraphs else [tail]):
-                    parts = [seg.strip() for seg in chunk.replace("！", "？").split("？") if seg.strip()]
-                    question_candidates.extend(parts)
-                if question_candidates:
-                    carry_over_question = question_candidates[-1][:120]
+                # 从最新段落取章末钩子
+                # 修复：原实现取 reversed 后的最后一个元素（最旧的），应取最新段落末尾的问题
+                if paragraphs:
+                    latest_chunk = paragraphs[-1].replace("！", "？")
+                    latest_parts = [seg.strip() for seg in latest_chunk.split("？") if seg.strip()]
+                    if latest_parts:
+                        carry_over_question = latest_parts[0][:120]
+                    elif open_threads:
+                        carry_over_question = open_threads[:120]
                 elif open_threads:
                     carry_over_question = open_threads[:120]
 
                 if not next_opening_hint:
                     next_opening_hint = ending_state[:120]
+            elif existing_summary:
+                # 修复问题 6：正文不可用时从现有记录保留接缝字段，避免覆盖为空
+                # 这保证了即使正文获取失败，seam 闭环所需的接缝数据也不会丢失
+                summary = getattr(existing_summary, "summary", "") or ""
+                ending_state = getattr(existing_summary, "ending_state", "") or ""
+                ending_emotion = getattr(existing_summary, "ending_emotion", "") or ""
+                carry_over_question = getattr(existing_summary, "carry_over_question", "") or ""
+                next_opening_hint = getattr(existing_summary, "next_opening_hint", "") or ""
+                # open_threads 已在前面根据 chapter_state.foreshadowing_planted 计算，保留其值
 
             self.knowledge_service.upsert_chapter_summary(
                 novel_id=novel_id,

@@ -276,11 +276,17 @@ class TripleIndexingService:
         """
         collection_name = self._get_collection_name(novel_id)
 
-        # 检查 collection 是否存在
+        # 检查 collection 是否存在，添加旧名称回退
         existing = await self._vector_store.list_collections()
         if collection_name not in existing:
-            logger.warning(f"Collection {collection_name} does not exist")
-            return []
+            # 回退到旧名称（带重复 novel- 前缀）
+            legacy_name = f"novel_{novel_id}_triples"
+            if legacy_name in existing:
+                collection_name = legacy_name
+                logger.debug(f"Using legacy collection name: {collection_name}")
+            else:
+                logger.warning(f"Collection {collection_name} does not exist")
+                return []
 
         # 生成查询向量
         query_vector = await self._embedding_service.embed(query)

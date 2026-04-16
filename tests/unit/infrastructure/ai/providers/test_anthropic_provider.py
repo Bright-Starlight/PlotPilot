@@ -1,4 +1,5 @@
 """AnthropicProvider 测试"""
+import json
 import pytest
 from unittest.mock import AsyncMock, Mock
 from domain.ai.value_objects.prompt import Prompt
@@ -104,7 +105,7 @@ class TestAnthropicProvider:
 
         result = await provider.generate(prompt, config)
 
-        assert result.content == '{"score": 88}'
+        assert json.loads(result.content) == {"score": 88}
 
     @pytest.mark.asyncio
     async def test_generate_accepts_tool_use_input_blocks(self, provider):
@@ -119,7 +120,7 @@ class TestAnthropicProvider:
 
         result = await provider.generate(prompt, config)
 
-        assert result.content == '{"summary": "ok", "count": 2}'
+        assert json.loads(result.content) == {"summary": "ok", "count": 2}
 
     @pytest.mark.asyncio
     async def test_generate_empty_content(self, provider):

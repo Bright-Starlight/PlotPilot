@@ -1221,11 +1221,13 @@ class ContextBudgetAllocator:
             for chapter in reversed(recent):  # 按时间顺序
                 lines.append(f"\n第 {chapter.number} 章：{chapter.title}")
                 meta = chapter_meta.get(chapter.number)
-                if meta and (
-                    getattr(meta, "ending_state", "").strip()
-                    or getattr(meta, "carry_over_question", "").strip()
-                    or getattr(meta, "next_opening_hint", "").strip()
-                    or getattr(meta, "summary", "").strip()
+                # 修复问题 1：使用 any() 检查所有接缝字段，避免遗漏 open_threads 和 ending_emotion
+                if meta and any(
+                    getattr(meta, field, "").strip()
+                    for field in (
+                        "summary", "open_threads", "ending_state",
+                        "ending_emotion", "carry_over_question", "next_opening_hint",
+                    )
                 ):
                     if meta.summary:
                         lines.append(f"摘要：{meta.summary}")
@@ -1258,41 +1260,78 @@ class ContextBudgetAllocator:
         chapter_number: int,
         outline: str,
     ) -> str:
-        """获取向量召回片段"""
+        """获取向量召回片段
+
+        从向量数据库中检索与当前章节大纲相关的上下文片段。
+        优先使用新的 collection 命名（无重复 novel- 前缀），
+        回退到旧的命名以保持向后兼容。
+
+        Args:
+            novel_id: 小说 ID
+            chapter_number: 当前章节号
+            outline: 当前章节大纲
+
+        Returns:
+            格式化后的向量召回片段文本
+        """
         if not self.vector_facade:
             return ""
-        
+
         try:
-            collection_name = f"novel_{novel_id}_chunks"
+            # 新的 collection 名称（修复了 novel- 前缀重复问题）
+            normalized_id = novel_id.replace("novel-", "") if novel_id.startswith("novel-") else novel_id
+            new_collection = f"novel_{normalized_id}_chunks"
+            # 旧的 collection 名称（带重复 novel- 前缀）
+            legacy_collection = f"novel_{novel_id}_chunks"
+
+            # 获取已有 collection 列表用于回退判断
+            existing_collections = []
+            try:
+                import asyncio
+                async def _list():
+                    return await self.vector_facade.vector_store.list_collections()
+                existing_collections = asyncio.run(_list())
+            except Exception:
+                pass
+
+            # 优先尝试新名称，回退到旧名称
+            if new_collection in existing_collections:
+                collection_name = new_collection
+            elif legacy_collection in existing_collections:
+                collection_name = legacy_collection
+            else:
+                # 两个都不存在，直接尝试新名称（可能是新建的）
+                collection_name = new_collection
+
             results = self.vector_facade.sync_search(
                 collection=collection_name,
                 query_text=outline,
                 limit=5,
             )
-            
+
             if not results:
                 return ""
-            
+
             # 过滤：排除当前章节，优先相近章节
             filtered = [
                 hit for hit in results
                 if hit.get("payload", {}).get("chapter_number") != chapter_number
             ]
-            
+
             if not filtered:
                 return ""
-            
+
             lines = ["【相关上下文（向量召回）】"]
             for hit in filtered[:3]:  # 最多 3 个片段
                 text = hit.get("payload", {}).get("text", "")
                 ch_num = hit.get("payload", {}).get("chapter_number", "?")
                 lines.append(f"\n[第 {ch_num} 章] {text}")
-            
+
             return "\n".join(lines)
-            
+
         except Exception as e:
             logger.warning(f"向量召回失败: {e}")
-        
+
         return ""
     
     def _get_diagnosis_breakpoints(

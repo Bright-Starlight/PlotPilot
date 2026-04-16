@@ -1052,8 +1052,24 @@ class AutoNovelGenerationWorkflow:
         seam_context: Dict[str, Any],
         attempt: int,
     ) -> Optional[str]:
-        if not self.llm_service:
-            return None
+        """重写章节开头以匹配上一章接缝
+
+        根据上一章的接缝数据（ending_state, ending_emotion, carry_over_question 等）
+        重写当前章节的开头，确保章节之间的连贯性。
+
+        Args:
+            novel_id: 小说 ID
+            chapter_number: 章节号
+            outline: 章节大纲
+            content: 章节内容
+            seam_context: 接缝上下文，包含上一章的摘要和接缝数据
+            attempt: 重写尝试次数
+
+        Returns:
+            重写后的内容，如果重写失败则返回 None
+        """
+        # 修复问题 3：将冗余的防御性检查改为断言，明确不变量
+        assert self.llm_service, "llm_service is required"
 
         opening, remainder = self._split_opening_for_rewrite(content)
         if not opening or not remainder:

@@ -216,6 +216,10 @@ class AutopilotDaemon:
                 else:
                     logger.debug(f"[{novel.novel_id}] ⏸️  等待人工审阅")
                     return  # 人工干预点：不处理，等前端确认
+            elif novel.current_stage == NovelStage.PAUSED_FOR_SEAM_REVIEW:
+                # 接缝复检失败暂停，无论是否全自动模式都等待人工修订
+                logger.warning(f"[{novel.novel_id}] ⏸️  接缝复检未通过，等待人工修订章节开头")
+                return  # 人工干预点：不处理，等前端确认
 
             # ✅ 收尾写库（合并 DB 停止标志，避免把用户「停止」写回 RUNNING）
             self._merge_autopilot_status_from_db(novel)
@@ -712,7 +716,7 @@ class AutopilotDaemon:
                         seam_rewrite_info.get("status"),
                     )
                     await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="reviewing")
-                    novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+                    novel.current_stage = NovelStage.PAUSED_FOR_SEAM_REVIEW
                     novel.last_audit_chapter_number = chapter_num
                     novel.last_audit_narrative_ok = False
                     novel.last_audit_at = datetime.now(timezone.utc).isoformat()
@@ -987,23 +991,45 @@ class AutopilotDaemon:
         outline: str,
         seam: Dict[str, str],
     ) -> tuple[bool, str]:
+        """检查下一章大纲是否与上一章接缝存在冲突
+
+        Args:
+            outline: 下一章大纲文本
+            seam: 上一章接缝数据，包含 ending_state, ending_emotion, carry_over_question, next_opening_hint
+
+        Returns:
+            tuple: (是否有冲突, 冲突描述)
+        """
         normalized_outline = self._normalize_seam_text(outline)
-        anchor_score = self._calculate_outline_anchor_score(normalized_outline, seam)
+        anchor_score, carryover_hint_score = self._calculate_outline_anchor_score(normalized_outline, seam)
         reset_markers = (
             "次日", "翌日", "第二天", "天亮", "清晨", "黎明", "晨光", "早晨",
         )
         has_reset_marker = any(marker in outline for marker in reset_markers)
 
-        if anchor_score >= 2:
+        if anchor_score >= 2 and carryover_hint_score >= 1:
             return False, ""
         if has_reset_marker and anchor_score == 0:
             return True, "下一章大纲另起时间场景，且未承接上一章接缝"
-        if anchor_score == 0 and (seam.get("carry_over_question") or seam.get("next_opening_hint")):
+        if carryover_hint_score == 0 and (seam.get("carry_over_question") or seam.get("next_opening_hint")):
             return True, "下一章大纲未覆盖上一章必须回应的问题或行动"
         return False, ""
 
-    def _calculate_outline_anchor_score(self, normalized_outline: str, seam: Dict[str, str]) -> int:
+    def _calculate_outline_anchor_score(self, normalized_outline: str, seam: Dict[str, str]) -> tuple[int, int]:
+        """计算大纲与接缝的锚点匹配分数
+
+        修复问题 10：分离 carryover_hint 分数，确保当 carry_over_question 存在时，
+        必须至少有一个来自该字段或 next_opening_hint 的锚点命中。
+
+        Args:
+            normalized_outline: 规范化后的大纲文本
+            seam: 接缝数据
+
+        Returns:
+            tuple: (总分数, carryover_hint分数)
+        """
         score = 0
+        carryover_hint_score = 0
         seen = set()
         for field in ("carry_over_question", "next_opening_hint", "ending_state"):
             keywords = self._extract_seam_keywords(seam.get(field, ""))
@@ -1015,7 +1041,10 @@ class AutopilotDaemon:
                     seen.add(keyword)
                     field_hits += 1
             score += min(field_hits, 2)
-        return score
+            # 单独计算 carryover_hint 分数，用于检测 carry_over_question 是否被回应
+            if field in ("carry_over_question", "next_opening_hint"):
+                carryover_hint_score += min(field_hits, 2)
+        return score, carryover_hint_score
 
     def _extract_seam_keywords(self, text: str) -> List[str]:
         normalized = self._normalize_seam_text(text)

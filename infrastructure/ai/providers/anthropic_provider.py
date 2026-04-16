@@ -160,12 +160,22 @@ class AnthropicProvider(BaseProvider):
             parts = []
             for block in response.content:
                 # 诊断日志：记录每个 block 的类型和内容
+                # 修复问题 11：使用安全预览替代原始值，避免敏感数据泄露
                 block_type_debug = getattr(block, "type", None)
+
+                def _preview(v):
+                    """安全预览函数：避免在日志中泄露敏感数据"""
+                    if isinstance(v, str):
+                        return v[:50]
+                    if isinstance(v, (dict, list, tuple)):
+                        return f"<{type(v).__name__} size={len(v)}>"
+                    return f"<{type(v).__name__}>"
+
                 block_attrs = {k: getattr(block, k, None) for k in ("text", "thinking", "json", "input", "arguments", "content")}
                 logger.debug(
                     "[Anthropic] content block: type=%r, attrs=%s",
                     block_type_debug,
-                    {k: (str(v)[:50] if v and isinstance(v, str) else v) for k, v in block_attrs.items()},
+                    {k: _preview(v) for k, v in block_attrs.items()},
                 )
                 text = _extract_text_from_content_block(block)
                 if text:
@@ -174,13 +184,14 @@ class AnthropicProvider(BaseProvider):
             content = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
             if not content:
                 # 记录完整响应供诊断
+                # 修复问题 12：安全提取 usage 属性，避免 usage 结构不同时抛出异常
                 stop_reason = getattr(response, "stop_reason", None)
                 usage = getattr(response, "usage", None)
                 logger.warning(
                     "[Anthropic] API returned no extractable text. "
                     "stop_reason=%r, usage=%s, content_blocks=%d, parts_found=%d",
                     stop_reason,
-                    f"input={usage.input_tokens}, output={usage.output_tokens}" if usage else None,
+                    f"input={getattr(usage, 'input_tokens', None)}, output={getattr(usage, 'output_tokens', None)}" if usage else None,
                     len(response.content),
                     len(parts),
                 )
