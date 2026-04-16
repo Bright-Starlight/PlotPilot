@@ -2,7 +2,6 @@
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
 from domain.ai.value_objects.prompt import Prompt
-from domain.ai.value_objects.token_usage import TokenUsage
 from domain.ai.services.llm_service import GenerationConfig
 from infrastructure.ai.config.settings import Settings
 from infrastructure.ai.providers.anthropic_provider import AnthropicProvider
@@ -48,17 +47,17 @@ class TestAnthropicProvider:
                 usage=Mock(input_tokens=10, output_tokens=5)
             )
 
-            result = await provider.generate(prompt, config)
+        result = await provider.generate(prompt, config)
 
-            assert result.content == "Hi there!"
-            assert result.token_usage.input_tokens == 10
-            assert result.token_usage.output_tokens == 5
+        assert result.content == "Hi there!"
+        assert result.token_usage.input_tokens == 10
+        assert result.token_usage.output_tokens == 5
 
-            mock_create.assert_called_once()
-            call_kwargs = mock_create.call_args[1]
-            assert call_kwargs['model'] == "claude-3-5-sonnet-20241022"
-            assert call_kwargs['temperature'] == 0.7
-            assert call_kwargs['max_tokens'] == 4096
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs['model'] == "claude-3-5-sonnet-20241022"
+        assert call_kwargs['temperature'] == 0.7
+        assert call_kwargs['max_tokens'] == 4096
 
     @pytest.mark.asyncio
     async def test_generate_with_custom_config(self, provider):
@@ -76,12 +75,42 @@ class TestAnthropicProvider:
                 usage=Mock(input_tokens=20, output_tokens=10)
             )
 
-            result = await provider.generate(prompt, config)
+        await provider.generate(prompt, config)
 
-            call_kwargs = mock_create.call_args[1]
-            assert call_kwargs['model'] == "claude-3-opus-20240229"
-            assert call_kwargs['temperature'] == 0.5
-            assert call_kwargs['max_tokens'] == 2048
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs['model'] == "claude-3-opus-20240229"
+        assert call_kwargs['temperature'] == 0.5
+        assert call_kwargs['max_tokens'] == 2048
+
+    @pytest.mark.asyncio
+    async def test_generate_accepts_text_blocks_without_type(self, provider):
+        """测试兼容端点未返回标准 type=text 时仍能提取文本。"""
+        prompt = Prompt(system="You are helpful", user="Hello")
+        config = GenerationConfig()
+
+        provider.async_client.messages.create = AsyncMock(return_value=Mock(
+            content=[Mock(text='{"ok": true}')],
+            usage=Mock(input_tokens=10, output_tokens=5)
+        ))
+
+        result = await provider.generate(prompt, config)
+
+        assert result.content == '{"ok": true}'
+
+    @pytest.mark.asyncio
+    async def test_generate_accepts_json_blocks(self, provider):
+        """测试 JSON block 可回退为字符串内容。"""
+        prompt = Prompt(system="You are helpful", user="Hello")
+        config = GenerationConfig()
+
+        provider.async_client.messages.create = AsyncMock(return_value=Mock(
+            content=[Mock(type="output_json", json={"score": 88})],
+            usage=Mock(input_tokens=10, output_tokens=5)
+        ))
+
+        result = await provider.generate(prompt, config)
+
+        assert result.content == '{"score": 88}'
 
     @pytest.mark.asyncio
     async def test_generate_empty_content(self, provider):
@@ -95,8 +124,8 @@ class TestAnthropicProvider:
                 usage=Mock(input_tokens=10, output_tokens=5)
             )
 
-            with pytest.raises(RuntimeError, match="empty content"):
-                await provider.generate(prompt, config)
+        with pytest.raises(RuntimeError, match="empty content"):
+            await provider.generate(prompt, config)
 
     @pytest.mark.asyncio
     async def test_generate_api_error(self, provider):
@@ -107,8 +136,8 @@ class TestAnthropicProvider:
         with patch.object(provider.async_client.messages, 'create', new_callable=AsyncMock) as mock_create:
             mock_create.side_effect = Exception("Anthropic API Error")
 
-            with pytest.raises(RuntimeError, match="Failed to generate text"):
-                await provider.generate(prompt, config)
+        with pytest.raises(RuntimeError, match="Failed to generate text"):
+            await provider.generate(prompt, config)
 
     @pytest.mark.asyncio
     async def test_generate_network_error(self, provider):
@@ -119,8 +148,8 @@ class TestAnthropicProvider:
         with patch.object(provider.async_client.messages, 'create', new_callable=AsyncMock) as mock_create:
             mock_create.side_effect = ConnectionError("Network unreachable")
 
-            with pytest.raises(RuntimeError, match="Failed to generate text"):
-                await provider.generate(prompt, config)
+        with pytest.raises(RuntimeError, match="Failed to generate text"):
+            await provider.generate(prompt, config)
 
     def test_missing_api_key(self):
         """测试缺少 API key"""
