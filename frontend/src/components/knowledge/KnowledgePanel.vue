@@ -432,6 +432,10 @@ interface Ch {
   key_events: string
   open_threads: string
   consistency_note: string
+  ending_state: string
+  ending_emotion: string
+  carry_over_question: string
+  next_opening_hint: string
   beat_sections: string[]
   sync_status: string
 }
@@ -630,6 +634,10 @@ const load = async () => {
         key_events: c.key_events || '',
         open_threads: c.open_threads || '',
         consistency_note: c.consistency_note || '',
+        ending_state: c.ending_state || '',
+        ending_emotion: c.ending_emotion || '',
+        carry_over_question: c.carry_over_question || '',
+        next_opening_hint: c.next_opening_hint || '',
         beat_sections: Array.isArray(c.beat_sections) ? [...c.beat_sections] : [],
         sync_status: (() => {
           const s = String(c.sync_status || 'draft').toLowerCase()
@@ -699,6 +707,10 @@ const addChapter = () => {
     key_events: '',
     open_threads: '',
     consistency_note: '',
+    ending_state: '',
+    ending_emotion: '',
+    carry_over_question: '',
+    next_opening_hint: '',
     beat_sections: [],
     sync_status: 'draft',
   })

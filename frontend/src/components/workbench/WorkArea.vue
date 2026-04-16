@@ -963,6 +963,15 @@ const handleStartGenerate = async () => {
           }
           activeTab.value = 'chapter-status'
         },
+        onNeedsManualRevision: (result) => {
+          lastWorkflowResult.value = result
+          lastQcChapterNumber.value = targetChapterNumber
+          generatedContent.value = result.content
+          streamProgressPct.value = 100
+          streamPhaseLabel.value = '需人工修订'
+          activeTab.value = 'editor'
+          message.warning(`接缝复检未通过：${result.message}`)
+        },
         onError: (err) => {
           if (!ctrl.signal.aborted) {
             message.error(`生成失败: ${err}`)

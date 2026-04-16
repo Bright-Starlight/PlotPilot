@@ -142,6 +142,7 @@ class ContextBudgetAllocator:
         triple_repository = None,
         vector_store: Optional[VectorStore] = None,
         embedding_service: Optional[EmbeddingService] = None,
+        knowledge_repository = None,
     ):
         self.foreshadowing_repo = foreshadowing_repository
         self.chapter_repo = chapter_repository
@@ -149,6 +150,7 @@ class ContextBudgetAllocator:
         self.story_node_repo = story_node_repository
         self.chapter_element_repo = chapter_element_repository
         self.triple_repo = triple_repository
+        self.knowledge_repo = knowledge_repository
         
         # 向量检索门面
         self.vector_facade = None
@@ -1173,7 +1175,7 @@ class ContextBudgetAllocator:
         chapter_number: int,
         limit: int = 3,
     ) -> str:
-        """获取最近章节内容"""
+        """获取最近章节内容，优先使用章节摘要里的接缝字段。"""
         if not self.chapter_repo:
             return ""
         
@@ -1190,16 +1192,42 @@ class ContextBudgetAllocator:
             
             if not recent:
                 return ""
-            
+
             lines = ["【最近章节】"]
+            chapter_meta = {}
+            if self.knowledge_repo:
+                try:
+                    knowledge = self.knowledge_repo.get_by_novel_id(novel_id)
+                    if knowledge:
+                        chapter_meta = {ch.chapter_id: ch for ch in knowledge.chapters}
+                except Exception as e:
+                    logger.debug("获取章节摘要元数据失败: %s", e)
             for chapter in reversed(recent):  # 按时间顺序
                 lines.append(f"\n第 {chapter.number} 章：{chapter.title}")
-                if chapter.content:
-                    # 截取前 500 字作为预览
-                    preview = chapter.content[:500]
+                meta = chapter_meta.get(chapter.number)
+                if meta and (
+                    getattr(meta, "ending_state", "").strip()
+                    or getattr(meta, "carry_over_question", "").strip()
+                    or getattr(meta, "next_opening_hint", "").strip()
+                    or getattr(meta, "summary", "").strip()
+                ):
+                    if meta.summary:
+                        lines.append(f"摘要：{meta.summary}")
+                    if meta.open_threads:
+                        lines.append(f"未解问题：{meta.open_threads}")
+                    if getattr(meta, "ending_state", "").strip():
+                        lines.append(f"章末状态：{meta.ending_state}")
+                    if getattr(meta, "ending_emotion", "").strip():
+                        lines.append(f"章末情绪：{meta.ending_emotion}")
+                    if getattr(meta, "carry_over_question", "").strip():
+                        lines.append(f"必须承接：{meta.carry_over_question}")
+                    if getattr(meta, "next_opening_hint", "").strip():
+                        lines.append(f"下一章开场提示：{meta.next_opening_hint}")
+                elif chapter.content:
+                    preview = chapter.content[-500:]
                     if len(chapter.content) > 500:
-                        preview += "..."
-                    lines.append(preview)
+                        preview = "..." + preview
+                    lines.append(f"章末片段：{preview}")
             
             return "\n".join(lines)
             

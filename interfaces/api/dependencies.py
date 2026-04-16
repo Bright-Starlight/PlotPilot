@@ -587,6 +587,7 @@ def get_context_builder() -> ContextBuilder:
         foreshadowing_repository=get_foreshadowing_repository(),
         chapter_element_repository=get_chapter_element_repository(),
         triple_repository=TripleRepository(),
+        knowledge_repository=get_knowledge_repository(),
     )
 
 

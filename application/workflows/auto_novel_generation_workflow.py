@@ -3,6 +3,7 @@
 整合所有子项目组件，实现完整的章节生成流程。
 """
 import logging
+import re
 from typing import Tuple, Dict, Any, AsyncIterator, Optional, List
 from application.engine.services.context_builder import ContextBuilder
 from application.analyst.services.state_extractor import StateExtractor
@@ -18,6 +19,7 @@ from domain.novel.repositories.plot_arc_repository import PlotArcRepository
 from domain.bible.repositories.bible_repository import BibleRepository
 from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepository
 from domain.novel.value_objects.consistency_report import ConsistencyReport
+from domain.novel.value_objects.consistency_report import Issue, IssueType, Severity
 from domain.novel.value_objects.chapter_state import ChapterState
 from domain.novel.value_objects.consistency_context import ConsistencyContext
 from domain.novel.value_objects.novel_id import NovelId
@@ -177,9 +179,22 @@ class AutoNovelGenerationWorkflow:
         scene_director: Optional[SceneDirectorAnalysis] = None,
     ) -> Dict[str, Any]:
         """生成正文后的统一后处理：俗套扫描、状态提取、一致性、冲突批注、StateUpdater。"""
+        content, seam_rewrite_info = await self._apply_seam_rewrite_loop(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            outline=outline,
+            content=content,
+        )
         style_warnings = self._scan_cliches(content)
         chapter_state = await self._extract_chapter_state(content, chapter_number)
         consistency_report = self._check_consistency(chapter_state, novel_id)
+        consistency_report = self._review_chapter_seam(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content=content,
+            base_report=consistency_report,
+            rewrite_info=seam_rewrite_info,
+        )
         ghost_annotations = self._detect_conflicts(novel_id, chapter_number, outline, scene_director)
         if self.state_updater:
             try:
@@ -187,10 +202,12 @@ class AutoNovelGenerationWorkflow:
             except Exception as e:
                 logger.warning("StateUpdater 失败: %s", e)
         return {
+            "content": content,
             "style_warnings": style_warnings,
             "chapter_state": chapter_state,
             "consistency_report": consistency_report,
             "ghost_annotations": ghost_annotations,
+            "seam_rewrite_info": seam_rewrite_info,
         }
 
     async def generate_chapter(
@@ -301,11 +318,21 @@ class AutoNovelGenerationWorkflow:
         post = await self.post_process_generated_chapter(
             novel_id, chapter_number, outline, content, scene_director=scene_director
         )
+        seam_rewrite_info = post.get("seam_rewrite_info") or {}
+        content = post.get("content") or content
         style_warnings = post["style_warnings"]
         consistency_report = post["consistency_report"]
         ghost_annotations = post["ghost_annotations"]
         if style_warnings:
             logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
+        if seam_rewrite_info.get("applied"):
+            logger.info(
+                "  ✓ 接缝修复已执行: attempts=%s status=%s",
+                seam_rewrite_info.get("attempts"),
+                seam_rewrite_info.get("status"),
+            )
+        if self._requires_manual_seam_revision(seam_rewrite_info):
+            raise RuntimeError("章节接缝复检未通过，需要人工修订后再保存")
 
         # Phase 5: Review - 返回结果
         logger.info(f"阶段 5: 完成 - 章节生成完成")
@@ -463,11 +490,43 @@ class AutoNovelGenerationWorkflow:
             post = await self.post_process_generated_chapter(
                 novel_id, chapter_number, outline, content, scene_director=scene_director
             )
+            seam_rewrite_info = post.get("seam_rewrite_info") or {}
+            original_content = content
+            content = post.get("content") or content
             style_warnings = post["style_warnings"]
             consistency_report = post["consistency_report"]
             ghost_annotations = post["ghost_annotations"]
             if style_warnings:
                 logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
+            if seam_rewrite_info.get("applied") and content != original_content:
+                yield {
+                    "type": "post_rewrite",
+                    "scope": "opening",
+                    "content": content,
+                    "seam_rewrite_info": seam_rewrite_info,
+                }
+            if self._requires_manual_seam_revision(seam_rewrite_info):
+                yield {
+                    "type": "needs_manual_revision",
+                    "reason": "seam_check_failed",
+                    "message": "章节接缝复检未通过，需要人工修订开头后再保存。",
+                    "content": content,
+                    "consistency_report": _consistency_report_to_dict(consistency_report),
+                    "token_count": context_tokens,
+                    "ghost_annotations": [ann.to_dict() for ann in ghost_annotations],
+                    "style_warnings": [
+                        {
+                            "pattern": hit.pattern,
+                            "text": hit.text,
+                            "start": hit.start,
+                            "end": hit.end,
+                            "severity": hit.severity,
+                        }
+                        for hit in style_warnings
+                    ],
+                    "seam_rewrite_info": seam_rewrite_info,
+                }
+                return
 
             token_count = context_tokens
             output_tokens = int(len(content) / 1.5)  # 预估输出 token
@@ -487,6 +546,7 @@ class AutoNovelGenerationWorkflow:
                 "total_tokens": total_tokens,
                 "chars": len(content),
                 "ghost_annotations": [ann.to_dict() for ann in ghost_annotations],
+                "seam_rewrite_info": seam_rewrite_info,
                 "style_warnings": [
                     {
                         "pattern": hit.pattern,
@@ -716,6 +776,15 @@ class AutoNovelGenerationWorkflow:
 
 {planning_section}{voice_block}{context}
 
+章节接缝约束：
+1. 本章开头必须优先承接“最近章节”中离当前最近一章的结尾状态，不能像新故事一样重新起势。
+2. 如果上一章结尾留下了动作、冲突、情绪或悬念，本章前 10%-15% 内容必须至少接住其中一项，并给出明确延续。
+3. 本章开头的时间、地点、人物状态如果发生变化，必须写出过渡原因，不能无跳板切场。
+4. 本章结尾必须同时做到两点：一是完成本章最核心的一步推进，二是留下可供下一章直接承接的钩子。
+5. 下一章可承接的钩子优先使用以下类型之一：新信息暴露、关系变化、决定落地、危机逼近、行动即将开始。
+6. 除非大纲明确要求大幅跳时空，否则不要让章节开头和上一章结尾在情绪、目标或局势上脱节。
+7. 如果上下文里出现“章末状态 / 章末情绪 / 必须承接 / 下一章开场提示”，这些内容优先级高于泛化发挥，必须显式体现在本章开头。
+
 写作要求：
 1. 必须有多个人物互动（至少2-3个角色出场）
 2. 必须有对话（不能只有独白和叙述）
@@ -736,6 +805,7 @@ class AutoNovelGenerationWorkflow:
 - 必须有明确的冲突或戏剧张力
 - 场景要具体生动，不要空泛叙述
 - 推进主线情节，不要原地踏步
+- 开头先承接上一章末尾的局势/情绪/动作，不要重新铺一个无关开场
 - 结尾要有悬念或转折"""
 
         if beat_mode:
@@ -830,6 +900,310 @@ class AutoNovelGenerationWorkflow:
         except Exception as e:
             logger.warning(f"Consistency check failed: {e}")
             return ConsistencyReport(issues=[], warnings=[], suggestions=[])
+
+    def _review_chapter_seam(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        content: str,
+        base_report: ConsistencyReport,
+        rewrite_info: Optional[Dict[str, Any]] = None,
+    ) -> ConsistencyReport:
+        """生成后自动检查本章开头是否承接上一章结尾。"""
+        if chapter_number <= 1 or not content.strip():
+            return base_report
+
+        seam_context = self._get_previous_chapter_seam_context(novel_id, chapter_number)
+        if seam_context is None:
+            return base_report
+
+        anchor_text = seam_context["anchor_text"]
+        if not anchor_text:
+            return base_report
+
+        opening = self._extract_opening_for_seam_review(content)
+        if not opening:
+            return base_report
+
+        if self._opening_matches_previous_seam(opening, anchor_text):
+            return base_report
+
+        warnings = list(base_report.warnings)
+        suggestions = list(base_report.suggestions)
+        seam_desc = (
+            f"第{chapter_number}章开头未明显承接上一章收尾。"
+            f"应优先接住上一章的章末状态/问题/开场提示，而不是另起场面。"
+        )
+        warnings.append(
+            Issue(
+                type=IssueType.EVENT_LOGIC_ERROR,
+                severity=Severity.MINOR,
+                description=seam_desc,
+                location=chapter_number,
+            )
+        )
+        suggestions.append(
+            "重写本章前 10%-15%：直接回应上一章的章末状态、未解问题或下一章开场提示。"
+        )
+        if rewrite_info and rewrite_info.get("attempts", 0) > 0:
+            suggestions.append(
+                f"系统已尝试 {rewrite_info['attempts']} 次自动修复开头接缝，但仍未达到阈值，建议人工检查首段。"
+            )
+        return ConsistencyReport(
+            issues=list(base_report.issues),
+            warnings=warnings,
+            suggestions=suggestions,
+        )
+
+    def _get_previous_chapter_seam_context(
+        self,
+        novel_id: str,
+        chapter_number: int,
+    ) -> Optional[Dict[str, Any]]:
+        knowledge_repo = getattr(self.context_builder, "knowledge_repository", None)
+        if knowledge_repo is None:
+            return None
+
+        try:
+            knowledge = knowledge_repo.get_by_novel_id(novel_id)
+        except Exception as e:
+            logger.debug("chapter seam context load failed: %s", e)
+            return None
+
+        if not knowledge:
+            return None
+
+        previous = None
+        for ch in knowledge.chapters:
+            if getattr(ch, "chapter_id", None) == chapter_number - 1:
+                previous = ch
+                break
+        if previous is None:
+            return None
+
+        anchors = [
+            getattr(previous, "ending_state", "") or "",
+            getattr(previous, "ending_emotion", "") or "",
+            getattr(previous, "carry_over_question", "") or "",
+            getattr(previous, "next_opening_hint", "") or "",
+        ]
+        anchor_text = "\n".join(x.strip() for x in anchors if x and x.strip()).strip()
+        if not anchor_text:
+            return None
+        return {
+            "previous": previous,
+            "anchor_text": anchor_text,
+        }
+
+    async def _apply_seam_rewrite_loop(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        outline: str,
+        content: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        info = {"attempts": 0, "applied": False, "status": "skipped"}
+        if chapter_number <= 1 or not content.strip():
+            return content, info
+
+        seam_context = self._get_previous_chapter_seam_context(novel_id, chapter_number)
+        if seam_context is None:
+            return content, info
+
+        current_content = content
+        for attempt in range(1, 3):
+            opening = self._extract_opening_for_seam_review(current_content)
+            if opening and self._opening_matches_previous_seam(opening, seam_context["anchor_text"]):
+                info["status"] = "passed"
+                return current_content, info
+
+            rewritten = await self._rewrite_chapter_opening_for_seam(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                outline=outline,
+                content=current_content,
+                seam_context=seam_context,
+                attempt=attempt,
+            )
+            info["attempts"] = attempt
+            if not rewritten or rewritten.strip() == current_content.strip():
+                info["status"] = "rewrite_noop"
+                return current_content, info
+            current_content = rewritten
+            info["applied"] = True
+
+        final_opening = self._extract_opening_for_seam_review(current_content)
+        info["status"] = (
+            "passed_after_rewrite"
+            if final_opening and self._opening_matches_previous_seam(final_opening, seam_context["anchor_text"])
+            else "failed_after_rewrite"
+        )
+        return current_content, info
+
+    async def _rewrite_chapter_opening_for_seam(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        outline: str,
+        content: str,
+        seam_context: Dict[str, Any],
+        attempt: int,
+    ) -> Optional[str]:
+        if not self.llm_service:
+            return None
+
+        opening, remainder = self._split_opening_for_rewrite(content)
+        if not opening or not remainder:
+            return None
+
+        previous = seam_context["previous"]
+        previous_block = "\n".join(
+            [
+                f"上一章摘要：{getattr(previous, 'summary', '') or '（无）'}",
+                f"上一章未解问题：{getattr(previous, 'open_threads', '') or '（无）'}",
+                f"上一章章末状态：{getattr(previous, 'ending_state', '') or '（无）'}",
+                f"上一章章末情绪：{getattr(previous, 'ending_emotion', '') or '（无）'}",
+                f"本章必须承接：{getattr(previous, 'carry_over_question', '') or '（无）'}",
+                f"建议开场提示：{getattr(previous, 'next_opening_hint', '') or '（无）'}",
+            ]
+        )
+        continuation = remainder[:700].strip()
+        prompt = Prompt(
+            system="""你是小说接缝修订编辑。你的任务不是重写整章，而是只修订章节开头，使其严密承接上一章结尾。
+
+必须遵守：
+1. 只输出“修订后的开头片段”，不要输出整章，不要解释。
+2. 必须承接上一章的章末状态、情绪或未解问题，不能另起炉灶。
+3. 不得改变本章既有剧情事实、角色关系、信息结论和后文走向。
+4. 必须与后续正文自然衔接，不能和后文打架，不能重复后文已写内容。
+5. 允许补一个过渡动作、承接对话、情绪延续或场景切换理由，但不要扩写新支线。""",
+            user=f"""当前正在修订第 {chapter_number} 章开头，第 {attempt} 次尝试。
+
+【上一章接缝卡】
+{previous_block}
+
+【本章大纲】
+{outline}
+
+【当前开头片段】
+{opening}
+
+【后续正文起始（仅供衔接，不可照抄重复）】
+{continuation}
+
+请只输出修订后的开头片段。""",
+        )
+        config = GenerationConfig(
+            max_tokens=max(800, min(2200, int(len(opening) * 1.8))),
+            temperature=0.3,
+        )
+        try:
+            result = await self.llm_service.generate(prompt, config)
+        except Exception as e:
+            logger.warning("chapter seam rewrite failed novel=%s ch=%s attempt=%s: %s", novel_id, chapter_number, attempt, e)
+            return None
+
+        rewritten_opening = (result.content or "").strip()
+        if not rewritten_opening:
+            return None
+        rewritten_opening = self._trim_duplicate_boundary(rewritten_opening, remainder)
+        return rewritten_opening.rstrip() + "\n\n" + remainder.lstrip()
+
+    @staticmethod
+    def _split_opening_for_rewrite(content: str) -> tuple[str, str]:
+        text = (content or "").strip()
+        if not text:
+            return "", ""
+        split_idx = max(220, min(950, int(len(text) * 0.14)))
+        boundary = text.rfind("\n\n", 0, split_idx + 120)
+        if boundary == -1:
+            boundary = text.find("\n\n", split_idx)
+        if boundary == -1:
+            boundary = split_idx
+        opening = text[:boundary].strip()
+        remainder = text[boundary:].strip()
+        if len(opening) < 120 or len(remainder) < 120:
+            return "", ""
+        return opening, remainder
+
+    @classmethod
+    def _trim_duplicate_boundary(cls, rewritten_opening: str, remainder: str) -> str:
+        candidate = rewritten_opening.rstrip()
+        remainder_head = (remainder or "").lstrip()[:120]
+        remainder_norm = cls._normalize_seam_text(remainder_head)
+        if not remainder_norm:
+            return candidate
+        lines = [line.rstrip() for line in candidate.splitlines() if line.strip()]
+        while lines:
+            last = lines[-1]
+            last_norm = cls._normalize_seam_text(last)
+            if last_norm and (last_norm in remainder_norm or remainder_norm.startswith(last_norm)):
+                lines.pop()
+                continue
+            break
+        return "\n".join(lines).strip() or candidate
+
+    @staticmethod
+    def _extract_opening_for_seam_review(content: str, max_chars: int = 650) -> str:
+        text = (content or "").strip()
+        if not text:
+            return ""
+        head = text[:max_chars]
+        parts = re.split(r"\n\s*\n", head)
+        if parts:
+            first_block = parts[0].strip()
+            if len(first_block) >= 80:
+                return first_block
+        return head
+
+    @staticmethod
+    def _normalize_seam_text(text: str) -> str:
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", (text or "").lower())
+
+    @classmethod
+    def _bigram_set(cls, text: str) -> set[str]:
+        normalized = cls._normalize_seam_text(text)
+        if len(normalized) < 2:
+            return set()
+        return {normalized[i:i + 2] for i in range(len(normalized) - 1)}
+
+    @classmethod
+    def _opening_matches_previous_seam(cls, opening: str, anchor_text: str) -> bool:
+        opening_norm = cls._normalize_seam_text(opening)
+        if not opening_norm:
+            return False
+
+        # 优先短语直接命中
+        fragments = [
+            frag.strip()
+            for frag in re.split(r"[，。；：！？、“”\"'\s]+", anchor_text)
+            if len(frag.strip()) >= 3
+        ]
+        direct_hits = 0
+        for frag in fragments[:12]:
+            norm_frag = cls._normalize_seam_text(frag)
+            if norm_frag and norm_frag in opening_norm:
+                direct_hits += 1
+        if direct_hits >= 1:
+            return True
+
+        # 回退到双字片段重合，降低对措辞改写的敏感度
+        opening_bigrams = cls._bigram_set(opening)
+        anchor_bigrams = cls._bigram_set(anchor_text)
+        if not opening_bigrams or not anchor_bigrams:
+            return False
+        overlap = opening_bigrams & anchor_bigrams
+        overlap_ratio = len(overlap) / max(1, min(len(anchor_bigrams), 12))
+        return len(overlap) >= 2 and overlap_ratio >= 0.2
+
+    @staticmethod
+    def _requires_manual_seam_revision(seam_rewrite_info: Optional[Dict[str, Any]]) -> bool:
+        if not seam_rewrite_info:
+            return False
+        return str(seam_rewrite_info.get("status") or "") == "failed_after_rewrite"
 
     def _detect_conflicts(
         self,

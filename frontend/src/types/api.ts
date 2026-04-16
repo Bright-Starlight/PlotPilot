@@ -254,6 +254,10 @@ export interface ChapterNarrativeEntry {
   key_events: string;
   open_threads: string;
   consistency_note: string;
+  ending_state: string;
+  ending_emotion: string;
+  carry_over_question: string;
+  next_opening_hint: string;
   beat_sections: string[];
   sync_status: string;
 }
