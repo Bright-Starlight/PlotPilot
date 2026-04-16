@@ -104,8 +104,10 @@ async def llm_chapter_extract_bundle(
         pending_foreshadows: 待回收伏笔描述列表（用于消费检测）
     """
     body = chapter_content.strip()
+    # 修复问题 13：对超长章节进行 head+tail 裁剪，确保 ending_* 字段能从章节末尾生成
     if len(body) > 24000:
-        body = body[:24000] + "\n\n…（正文过长已截断）"
+        tail_size = 6000
+        body = body[:18000] + "\n\n…（正文中间部分已截断）\n\n" + body[-tail_size:]
 
     # 构建待回收伏笔提示
     foreshadow_context = ""

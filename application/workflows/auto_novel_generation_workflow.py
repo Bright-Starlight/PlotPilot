@@ -196,7 +196,8 @@ class AutoNovelGenerationWorkflow:
             rewrite_info=seam_rewrite_info,
         )
         ghost_annotations = self._detect_conflicts(novel_id, chapter_number, outline, scene_director)
-        if self.state_updater:
+        # 修复问题 9：只有章节通过 seam 检查后才持久化状态，避免被拒绝的章节污染知识库
+        if self.state_updater and not self._requires_manual_seam_revision(seam_rewrite_info):
             try:
                 self.state_updater.update_from_chapter(novel_id, chapter_number, chapter_state)
             except Exception as e:
@@ -1029,7 +1030,7 @@ class AutoNovelGenerationWorkflow:
             )
             info["attempts"] = attempt
             if not rewritten or rewritten.strip() == current_content.strip():
-                info["status"] = "rewrite_noop"
+                info["status"] = "failed_after_rewrite"
                 return current_content, info
             current_content = rewritten
             info["applied"] = True

@@ -849,6 +849,7 @@ class AutopilotDaemon:
         )
         has_seam_signal = any(seam.get(key) for key in (
             "ending_state",
+            "ending_emotion",
             "carry_over_question",
             "next_opening_hint",
         ))
@@ -1031,7 +1032,7 @@ class AutopilotDaemon:
         score = 0
         carryover_hint_score = 0
         seen = set()
-        for field in ("carry_over_question", "next_opening_hint", "ending_state"):
+        for field in ("carry_over_question", "next_opening_hint", "ending_state", "ending_emotion"):
             keywords = self._extract_seam_keywords(seam.get(field, ""))
             field_hits = 0
             for keyword in keywords:

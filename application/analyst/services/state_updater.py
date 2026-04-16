@@ -411,12 +411,12 @@ class StateUpdater:
                 ending_emotion = "、".join(hits[:3]) if hits else tail[:60]
 
                 # 从最新段落取章末钩子
-                # 修复：原实现取 reversed 后的最后一个元素（最旧的），应取最新段落末尾的问题
+                # 修复：取最新段落末尾的问题（latest_parts[-1]），而非开头的
                 if paragraphs:
                     latest_chunk = paragraphs[-1].replace("！", "？")
                     latest_parts = [seg.strip() for seg in latest_chunk.split("？") if seg.strip()]
                     if latest_parts:
-                        carry_over_question = latest_parts[0][:120]
+                        carry_over_question = latest_parts[-1][:120]
                     elif open_threads:
                         carry_over_question = open_threads[:120]
                 elif open_threads:

@@ -112,6 +112,8 @@ class TripleIndexingService:
     async def ensure_collection(self, novel_id: str) -> None:
         """确保 collection 存在，如果不存在则创建
 
+        修复问题 15：添加 legacy collection 回退，避免迁移期间读写分歧。
+
         Args:
             novel_id: 小说 ID
 
@@ -123,6 +125,11 @@ class TripleIndexingService:
         existing_collections = await self._vector_store.list_collections()
 
         if collection_name not in existing_collections:
+            # 检查 legacy collection 是否存在，避免覆盖旧数据
+            legacy_name = f"novel_{novel_id}_triples"
+            if legacy_name in existing_collections:
+                logger.debug(f"Using legacy collection: {legacy_name}")
+                return
             await self._vector_store.create_collection(
                 collection=collection_name,
                 dimension=self._embedding_dimension
