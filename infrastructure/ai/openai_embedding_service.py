@@ -1,5 +1,6 @@
 """OpenAI 嵌入服务实现"""
 import os
+
 from typing import List, Optional
 from openai import AsyncOpenAI
 from domain.ai.services.embedding_service import EmbeddingService
@@ -9,7 +10,7 @@ class OpenAIEmbeddingService(EmbeddingService):
     """OpenAI 嵌入服务实现
 
     使用 OpenAI 的 text-embedding-3-small 模型生成文本嵌入向量。
-    支持从环境变量或显式参数初始化（用于数据库配置注入）。
+    API Key 必须由调用方显式传入（通过 EmbeddingConfigService 从数据库读取）。
     """
 
     def __init__(
@@ -21,21 +22,20 @@ class OpenAIEmbeddingService(EmbeddingService):
         """初始化 OpenAI 嵌入服务
 
         Args:
-            api_key: API 密钥（不传则从环境变量读取）
-            base_url: 自定义端点（不传则从环境变量读取）
-            model: 模型名称（不传则从环境变量读取）
+            api_key: API 密钥（由调用方从数据库配置中传入）
+            base_url: 自定义端点
+            model: 模型名称
 
         Raises:
-            ValueError: 如果 API Key 未设置
+            ValueError: 如果 api_key 为空
         """
-        _api_key = api_key or os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not _api_key:
-            raise ValueError("EMBEDDING_API_KEY or OPENAI_API_KEY environment variable is required")
+        api_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is required")
 
-        _base_url = base_url or os.getenv("EMBEDDING_BASE_URL") or None
-        self.client = AsyncOpenAI(api_key=_api_key, base_url=_base_url)
-        self.model = model or os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-        self._dimension: int = 0
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
+        self.model = model or "text-embedding-3-small"
+        self._dimension: int = 1536
 
     @classmethod
     def from_config(cls, config: dict) -> "OpenAIEmbeddingService":

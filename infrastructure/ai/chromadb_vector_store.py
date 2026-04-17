@@ -1,10 +1,19 @@
 # infrastructure/ai/chromadb_vector_store.py
+"""
+基于 FAISS 的向量存储实现（纯本地，兼容 Windows）
+
+⚠️ 重要：本模块采用懒加载（Lazy Import）策略。
+  faiss / numpy 均不在模块顶层导入，而是在 __init__ 和各方法中
+  按需导入。这样即使未安装 requirements-local.txt 的用户，
+  import 本模块也不会崩溃。
+
+使用 FAISS 进行向量检索，使用 JSON 文件管理元数据。
+命名保持 ChromaDB 以兼容现有代码。
+"""
 from typing import List
 import json
-import os
 from pathlib import Path
-import numpy as np
-import faiss
+
 from domain.ai.services.vector_store import VectorStore
 
 
@@ -13,6 +22,8 @@ class ChromaDBVectorStore(VectorStore):
 
     使用 FAISS 进行向量检索，使用 JSON 文件管理元数据。
     命名保持 ChromaDB 以兼容现有代码。
+
+    所有重依赖（faiss, numpy）均采用懒加载策略。
     """
 
     def __init__(self, persist_directory: str = "./data/chromadb"):
@@ -22,6 +33,15 @@ class ChromaDBVectorStore(VectorStore):
         Args:
             persist_directory: 本地持久化目录
         """
+        # 懒加载 faiss 和 numpy
+        self._use_faiss = False
+        try:
+            import faiss
+            import numpy as np  # noqa: F401
+            self._use_faiss = True
+        except ImportError as e:
+            self._import_error = e
+
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
         self.collections = {}  # {collection_name: {"index": faiss.Index, "metadata": dict}}
@@ -29,6 +49,10 @@ class ChromaDBVectorStore(VectorStore):
 
     def _load_collections(self):
         """加载所有已存在的集合"""
+        if not self._use_faiss:
+            return
+        import faiss
+
         if not self.persist_directory.exists():
             return
 
@@ -49,6 +73,10 @@ class ChromaDBVectorStore(VectorStore):
 
     def _save_collection(self, collection: str):
         """保存集合到磁盘"""
+        if not self._use_faiss:
+            return
+        import faiss
+
         collection_dir = self.persist_directory / collection
         collection_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +96,8 @@ class ChromaDBVectorStore(VectorStore):
         payload: dict
     ) -> None:
         """插入向量到集合中"""
+        import numpy as np
+
         try:
             if collection not in self.collections:
                 raise Exception(f"Collection {collection} does not exist")
@@ -76,12 +106,11 @@ class ChromaDBVectorStore(VectorStore):
             vec_array = np.array([vector], dtype=np.float32)
             actual_dim = int(vec_array.shape[1])
 
-            # 用实际向量维度检测 FAISS 索引维度，不匹配则重建
-            if coll["index"].d != actual_dim:
+            if coll["dimension"] != actual_dim:
                 import logging
                 logging.getLogger(__name__).warning(
-                    "FAISS索引维度不匹配，自动重建 collection=%s old_dim=%d actual_dim=%d",
-                    collection, coll["index"].d, actual_dim
+                    "向量集合维度不匹配，自动重建 collection=%s old_dim=%d actual_dim=%d",
+                    collection, coll["dimension"], actual_dim
                 )
                 await self.delete_collection(collection)
                 await self.create_collection(collection, actual_dim)
@@ -91,17 +120,15 @@ class ChromaDBVectorStore(VectorStore):
             if id in coll["metadata"]:
                 await self.delete(collection, id)
 
-            # 添加到 FAISS 索引
-            coll["index"].add(vec_array)
-            idx = coll["index"].ntotal - 1
-
-            # 保存元数据
             coll["metadata"][id] = {
-                "idx": idx,
+                "vector": list(vector),
                 "payload": payload
             }
 
-            self._save_collection(collection)
+            if self._use_faiss:
+                coll["index"].add(vec_array)
+                coll["metadata"][id]["idx"] = coll["index"].ntotal - 1
+                self._save_collection(collection)
         except Exception as e:
             raise Exception(f"Failed to insert vector: {str(e)}")
 
@@ -112,37 +139,31 @@ class ChromaDBVectorStore(VectorStore):
         limit: int
     ) -> List[dict]:
         """搜索相似向量"""
+        import numpy as np
+
         try:
             if collection not in self.collections:
                 raise Exception(f"Collection {collection} does not exist")
 
             coll = self.collections[collection]
-            if coll["index"].ntotal == 0:
+            if not coll["metadata"]:
                 return []
 
-            query_array = np.array([query_vector], dtype=np.float32)
-            distances, indices = coll["index"].search(query_array, min(limit, coll["index"].ntotal))
-
-            # 构建 ID 到索引的反向映射
-            idx_to_id = {v["idx"]: k for k, v in coll["metadata"].items()}
-
-            # 转换为统一格式
+            query_array = np.array(query_vector, dtype=np.float32)
             output = []
-            for i, (dist, idx) in enumerate(zip(distances[0], indices[0])):
-                if idx == -1:  # FAISS 返回 -1 表示无效结果
-                    continue
-
-                vec_id = idx_to_id.get(int(idx))
-                if vec_id:
-                    # 将 L2 距离转换为相似度分数 (0-1)
-                    score = 1.0 / (1.0 + float(dist))
-                    output.append({
+            for vec_id, meta in coll["metadata"].items():
+                vector = np.array(meta["vector"], dtype=np.float32)
+                dist = float(np.sum((vector - query_array) ** 2))
+                output.append(
+                    {
                         "id": vec_id,
-                        "score": score,
-                        "payload": coll["metadata"][vec_id]["payload"]
-                    })
+                        "score": 1.0 / (1.0 + dist),
+                        "payload": meta["payload"],
+                    }
+                )
 
-            return output
+            output.sort(key=lambda item: item["score"], reverse=True)
+            return output[:limit]
         except Exception as e:
             raise Exception(f"Failed to search vectors: {str(e)}")
 
@@ -171,7 +192,7 @@ class ChromaDBVectorStore(VectorStore):
         """创建集合（若已存在且维度匹配则跳过；维度不匹配时删除后重建）"""
         try:
             if collection in self.collections:
-                existing_dim = self.collections[collection]["index"].d
+                existing_dim = self.collections[collection]["dimension"]
                 if dimension == 0 or existing_dim == dimension:
                     return  # 未知维度(0)或维度匹配，跳过重建
                 # 嵌入模型已更换，旧索引不兼容，重建
@@ -182,13 +203,16 @@ class ChromaDBVectorStore(VectorStore):
                 )
                 await self.delete_collection(collection)
 
-            # 创建 FAISS 索引（使用 L2 距离）
-            index = faiss.IndexFlatL2(dimension)
             self.collections[collection] = {
-                "index": index,
+                "index": None,
+                "dimension": dimension,
                 "metadata": {}
             }
-            self._save_collection(collection)
+            if self._use_faiss:
+                import faiss
+
+                self.collections[collection]["index"] = faiss.IndexFlatL2(dimension)
+                self._save_collection(collection)
         except Exception as e:
             raise Exception(f"Failed to create collection: {repr(e)}")
 
@@ -197,6 +221,8 @@ class ChromaDBVectorStore(VectorStore):
         collection: str
     ) -> None:
         """删除集合"""
+        import shutil
+
         try:
             if collection in self.collections:
                 del self.collections[collection]
@@ -204,7 +230,6 @@ class ChromaDBVectorStore(VectorStore):
             # 删除磁盘文件
             collection_dir = self.persist_directory / collection
             if collection_dir.exists():
-                import shutil
                 shutil.rmtree(collection_dir)
         except Exception as e:
             raise Exception(f"Failed to delete collection: {str(e)}")
