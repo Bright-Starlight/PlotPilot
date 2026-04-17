@@ -80,6 +80,7 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 
 let chartInstance: ECharts | null = null
+let resizeObserver: ResizeObserver | null = null
 
 // 张力警戒线
 const tensionThreshold = computed(() => props.threshold ?? 5.0)
@@ -152,6 +153,13 @@ function renderChart() {
 
   if (!chartInstance) {
     chartInstance = init(chartRef.value)
+    // 在 chartRef 确保存在后才初始化 ResizeObserver（解决 onMounted 时 chartRef 为 null 的问题）
+    if (!resizeObserver) {
+      resizeObserver = new ResizeObserver(() => {
+        chartInstance?.resize()
+      })
+      resizeObserver.observe(chartRef.value)
+    }
   }
 
   const chapterNumbers = tensionData.value.map((d) => d.chapter_number)
@@ -319,6 +327,12 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   if (resizeTimer) clearTimeout(resizeTimer)
+  // 清理 ResizeObserver
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+  // 显式 dispose 旧实例（Vue+ECharts 组件刷新必需）
   chartInstance?.dispose()
   chartInstance = null
 })
