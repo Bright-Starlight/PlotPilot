@@ -63,8 +63,6 @@ class StateExtractor:
             f"new_characters={len(chapter_state.new_characters)}, "
             f"character_actions={len(chapter_state.character_actions)}, "
             f"relationship_changes={len(chapter_state.relationship_changes)}, "
-            f"foreshadowing_planted={len(chapter_state.foreshadowing_planted)}, "
-            f"foreshadowing_resolved={len(chapter_state.foreshadowing_resolved)}, "
             f"events={len(chapter_state.events)}"
         )
         return chapter_state

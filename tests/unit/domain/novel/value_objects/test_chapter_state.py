@@ -11,16 +11,12 @@ class TestChapterState:
             new_characters=[],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[]
         )
 
         assert state.new_characters == []
         assert state.character_actions == []
         assert state.relationship_changes == []
-        assert state.foreshadowing_planted == []
-        assert state.foreshadowing_resolved == []
         assert state.events == []
 
     def test_create_state_with_new_characters(self):
@@ -35,8 +31,6 @@ class TestChapterState:
             ],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[]
         )
 
@@ -57,8 +51,6 @@ class TestChapterState:
                 }
             ],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[]
         )
 
@@ -80,8 +72,6 @@ class TestChapterState:
                     "chapter": 5
                 }
             ],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[]
         )
 
@@ -91,40 +81,12 @@ class TestChapterState:
         assert state.relationship_changes[0]["old_type"] == "stranger"
         assert state.relationship_changes[0]["new_type"] == "friend"
 
-    def test_create_state_with_foreshadowing(self):
-        """测试创建包含伏笔的状态"""
-        state = ChapterState(
-            new_characters=[],
-            character_actions=[],
-            relationship_changes=[],
-            foreshadowing_planted=[
-                {
-                    "description": "神秘的预言",
-                    "chapter": 5
-                }
-            ],
-            foreshadowing_resolved=[
-                {
-                    "foreshadowing_id": "foreshadow-1",
-                    "chapter": 10
-                }
-            ],
-            events=[]
-        )
-
-        assert len(state.foreshadowing_planted) == 1
-        assert state.foreshadowing_planted[0]["description"] == "神秘的预言"
-        assert len(state.foreshadowing_resolved) == 1
-        assert state.foreshadowing_resolved[0]["foreshadowing_id"] == "foreshadow-1"
-
     def test_create_state_with_events(self):
         """测试创建包含事件的状态"""
         state = ChapterState(
             new_characters=[],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[
                 {
                     "type": "conflict",
@@ -146,8 +108,6 @@ class TestChapterState:
             new_characters=[],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[]
         )
 
@@ -160,8 +120,6 @@ class TestChapterState:
             new_characters=[{"name": "张三", "description": "测试", "first_appearance": 1}],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[]
         )
 
@@ -169,8 +127,6 @@ class TestChapterState:
             new_characters=[],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[]
         )
 
@@ -185,8 +141,6 @@ class TestChapterState:
             relationship_changes=[
                 {"char1": "c1", "char2": "c2", "old_type": "stranger", "new_type": "friend", "chapter": 1}
             ],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[]
         )
 
@@ -194,43 +148,48 @@ class TestChapterState:
             new_characters=[],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
             events=[]
         )
 
         assert state_with_changes.has_relationship_changes() is True
         assert state_without_changes.has_relationship_changes() is False
 
-    def test_has_foreshadowing_activity(self):
-        """测试检查是否有伏笔活动"""
-        state_with_planted = ChapterState(
+    def test_has_timeline_events(self):
+        """测试检查是否有时间线事件"""
+        state_with_events = ChapterState(
             new_characters=[],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[{"description": "test", "chapter": 1}],
-            foreshadowing_resolved=[],
-            events=[]
+            events=[],
+            timeline_events=[{"event": "test", "timestamp": "2024-01-01", "timestamp_type": "absolute"}]
         )
 
-        state_with_resolved = ChapterState(
+        state_without_events = ChapterState(
             new_characters=[],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[{"foreshadowing_id": "f1", "chapter": 1}],
             events=[]
         )
 
-        state_without = ChapterState(
+        assert state_with_events.has_timeline_events() is True
+        assert state_without_events.has_timeline_events() is False
+
+    def test_has_storyline_activity(self):
+        """测试检查是否有故事线活动"""
+        state_with_activity = ChapterState(
             new_characters=[],
             character_actions=[],
             relationship_changes=[],
-            foreshadowing_planted=[],
-            foreshadowing_resolved=[],
+            events=[],
+            advanced_storylines=[{"storyline_id": "s1", "progress_summary": "test"}]
+        )
+
+        state_without_activity = ChapterState(
+            new_characters=[],
+            character_actions=[],
+            relationship_changes=[],
             events=[]
         )
 
-        assert state_with_planted.has_foreshadowing_activity() is True
-        assert state_with_resolved.has_foreshadowing_activity() is True
-        assert state_without.has_foreshadowing_activity() is False
+        assert state_with_activity.has_storyline_activity() is True
+        assert state_without_activity.has_storyline_activity() is False

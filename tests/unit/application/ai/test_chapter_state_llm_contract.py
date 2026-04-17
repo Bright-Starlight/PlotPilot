@@ -7,7 +7,7 @@ from application.ai.chapter_state_llm_contract import (
 
 
 def test_parse_valid():
-    raw = '{"new_characters": [], "character_actions": [], "relationship_changes": [], "foreshadowing_planted": [], "foreshadowing_resolved": [], "events": []}'
+    raw = '{"new_characters": [], "character_actions": [], "relationship_changes": [], "events": []}'
     p, errs = parse_chapter_state_llm_response(raw)
     assert errs == []
     assert p is not None
@@ -18,7 +18,7 @@ def test_parse_valid():
 def test_rejects_extra_root_key():
     raw = (
         '{"new_characters": [], "character_actions": [], "relationship_changes": [], '
-        '"foreshadowing_planted": [], "foreshadowing_resolved": [], "events": [], "extra": 1}'
+        '"events": [], "extra": 1}'
     )
     p, errs = parse_chapter_state_llm_response(raw)
     assert p is None
