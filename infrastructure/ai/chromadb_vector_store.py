@@ -68,6 +68,7 @@ class ChromaDBVectorStore(VectorStore):
                         metadata = json.load(f)
                     self.collections[collection_name] = {
                         "index": index,
+                        "dimension": index.d,
                         "metadata": metadata
                     }
 

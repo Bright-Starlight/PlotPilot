@@ -76,6 +76,16 @@ def _extract_text_from_content_block(block: Any) -> str:
         # 思考块不属于正文，直接忽略，避免写入章节内容。
         return ""
 
+    # 修复问题 16：处理 refusal 和 error 类型 block
+    if block_type in ("refusal", "error"):
+        refusal_text = getattr(block, "text", None) or getattr(block, "error", None)
+        if isinstance(refusal_text, str) and refusal_text.strip():
+            return refusal_text
+        # 尝试从 block 整体转换为字符串
+        if isinstance(block, dict):
+            return block.get("reason", "") or str(block)
+        return str(block)
+
     return ""
 
 

@@ -125,8 +125,8 @@ class TripleIndexingService:
         existing_collections = await self._vector_store.list_collections()
 
         if collection_name not in existing_collections:
-            # 检查 legacy collection 是否存在，避免覆盖旧数据
-            legacy_name = f"novel_{novel_id}_triples"
+            # 回退到旧名称（归一化后与 _get_collection_name 同名）
+            legacy_name = self._get_collection_name(novel_id)
             if legacy_name in existing_collections:
                 logger.debug(f"Using legacy collection: {legacy_name}")
                 return
@@ -286,8 +286,8 @@ class TripleIndexingService:
         # 检查 collection 是否存在，添加旧名称回退
         existing = await self._vector_store.list_collections()
         if collection_name not in existing:
-            # 回退到旧名称（带重复 novel- 前缀）
-            legacy_name = f"novel_{novel_id}_triples"
+            # 回退到旧名称（归一化后与 _get_collection_name 同名）
+            legacy_name = self._get_collection_name(novel_id)
             if legacy_name in existing:
                 collection_name = legacy_name
                 logger.debug(f"Using legacy collection name: {collection_name}")

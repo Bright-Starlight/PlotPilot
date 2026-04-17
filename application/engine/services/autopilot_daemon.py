@@ -73,7 +73,7 @@ class AutopilotDaemon:
         self.foreshadowing_repository = foreshadowing_repository
         self.theme_agent = None  # ThemeAgent 插槽，由外部注入
         self.chapter_generation_metrics_repository = chapter_generation_metrics_repository
-        
+
         # 惰性初始化 VolumeSummaryService
         if not self.volume_summary_service and llm_service and story_node_repo:
             from application.blueprint.services.volume_summary_service import VolumeSummaryService
@@ -83,6 +83,16 @@ class AutopilotDaemon:
                 chapter_repository=chapter_repository,
                 foreshadowing_repository=foreshadowing_repository,
             )
+
+        # 惰性初始化 TensionScoringService（统一张力评分策略）
+        self._tension_scoring_service = None
+
+    def _get_tension_scoring_service(self):
+        """获取张力评分服务（惰性初始化）"""
+        if self._tension_scoring_service is None and self.llm_service:
+            from application.analyst.services.tension_scoring_service import TensionScoringService
+            self._tension_scoring_service = TensionScoringService(self.llm_service)
+        return self._tension_scoring_service
 
     def run_forever(self):
         """守护进程主循环（事务最小化原则）"""
@@ -948,6 +958,7 @@ class AutopilotDaemon:
                 e,
                 exc_info=True,
             )
+            raise  # 传播给外层 circuit breaker 处理
 
         # 8. 更新计数器，重置节拍索引
         novel.current_auto_chapters = (novel.current_auto_chapters or 0) + 1
@@ -1291,17 +1302,28 @@ class AutopilotDaemon:
             reason=reason,
         )
         config = GenerationConfig(max_tokens=280, temperature=0.45)
-        try:
-            result = await self.llm_service.generate(prompt, config)
-        except Exception as e:
-            logger.warning(
-                "[%s] 自动重写第 %s 章大纲失败：%s",
-                novel.novel_id,
-                next_chapter_node.number,
-                e,
-            )
-            return None
-        return (result.content or "").strip()
+        last_error = None
+        for attempt in range(3):
+            try:
+                result = await self.llm_service.generate(prompt, config)
+                return (result.content or "").strip()
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "[%s] 自动重写第 %s 章大纲失败（第 %s 次尝试）：%s",
+                    novel.novel_id,
+                    next_chapter_node.number,
+                    attempt + 1,
+                    e,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+        logger.error(
+            "[%s] 自动重写第 %s 章大纲连续 3 次失败，终止托管",
+            novel.novel_id,
+            next_chapter_node.number,
+        )
+        raise RuntimeError(f"自动重写大纲连续失败: {last_error}")
 
     def _build_next_chapter_outline_replan_prompt(
         self,
@@ -1418,13 +1440,26 @@ class AutopilotDaemon:
                 novel, chapter_num, content, chapter_id
             )
 
-        # 2. 张力打分（轻量 LLM 调用，~200 token）
-        tension = await self._score_tension(content)
-        novel.last_chapter_tension = tension
-        # 保存张力值到章节（用于张力曲线图）
-        chapter.update_tension_score(tension * 10)  # 转换为 0-100 范围
+        # 2. 张力打分（统一使用 TensionScoringService，计算四字段）
+        tension_svc = self._get_tension_scoring_service()
+        prev_tension = novel.last_chapter_tension or 50.0
+        try:
+            dims = await tension_svc.score_chapter(
+                chapter_content=content,
+                chapter_number=chapter_num,
+                prev_chapter_tension=prev_tension,
+            )
+            chapter.update_tension_dimensions(dims)
+            novel.last_chapter_tension = dims.composite_score / 10.0
+            logger.info(
+                f"[{novel.novel_id}] 章节 {chapter_num} 张力值：综合={dims.composite_score:.1f} "
+                f"情节={dims.plot_tension:.1f} 情绪={dims.emotional_tension:.1f} 节奏={dims.pacing_tension:.1f}"
+            )
+        except Exception as e:
+            logger.warning(f"[{novel.novel_id}] 章节 {chapter_num} 张力评分失败，降级默认值：{e}")
+            chapter.update_tension_score(50.0)
+            novel.last_chapter_tension = 5.0  # 0-10 范围，与 chapter.update_tension_score(50.0) 对应
         self.chapter_repository.save(chapter)
-        logger.info(f"[{novel.novel_id}] 章节 {chapter_num} 张力值：{tension}/10")
 
         # 章末审阅快照（写入 novels，供 /autopilot/status 与前台「章节状态 / 章节元素」）
         previous_same_chapter_drift = (
