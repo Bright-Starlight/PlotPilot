@@ -160,6 +160,7 @@ class EmbeddingConfigService:
             ("default",),
         ).fetchone()
         if not row:
+            # 兜底：返回默认模型
             return EmbeddingConfigModel()
         return EmbeddingConfigModel.from_row(dict(row))
 
@@ -175,6 +176,7 @@ class EmbeddingConfigService:
         self._ensure_row()
         db = self._get_db()
 
+        # 构建动态 UPDATE
         allowed = {"mode", "api_key", "base_url", "model", "use_gpu", "model_path"}
         set_clauses = []
         params: list = []
@@ -192,7 +194,7 @@ class EmbeddingConfigService:
         now = datetime.now().isoformat()
         set_clauses.append("updated_at = ?")
         params.append(now)
-        params.append("default")
+        params.append("default")  # WHERE id = ?
 
         sql = f"UPDATE embedding_config SET {', '.join(set_clauses)} WHERE id = ?"
         db.execute(sql, params)
@@ -207,6 +209,7 @@ class EmbeddingConfigService:
         return cfg.to_api_dict()
 
 
+# ── 单例 ──────────────────────────────────────────────
 _service_instance: Optional[EmbeddingConfigService] = None
 
 
