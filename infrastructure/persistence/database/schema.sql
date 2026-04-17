@@ -487,6 +487,30 @@ CREATE TABLE IF NOT EXISTS chapter_style_scores (
 CREATE INDEX IF NOT EXISTS idx_chapter_style_scores_novel
     ON chapter_style_scores(novel_id, chapter_number);
 
+-- ========== 章节生成质量控制指标 ==========
+CREATE TABLE IF NOT EXISTS chapter_generation_metrics (
+    novel_id TEXT NOT NULL,
+    chapter_number INTEGER NOT NULL,
+    generated_via TEXT NOT NULL DEFAULT 'manual',
+    target_word_count INTEGER NOT NULL,
+    actual_word_count INTEGER NOT NULL,
+    tolerance REAL NOT NULL DEFAULT 0.15,
+    delta INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'ok',
+    within_tolerance INTEGER NOT NULL DEFAULT 0,
+    action TEXT NOT NULL DEFAULT 'none',
+    expansion_attempts INTEGER NOT NULL DEFAULT 0,
+    trim_applied INTEGER NOT NULL DEFAULT 0,
+    fallback_used INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (novel_id, chapter_number),
+    FOREIGN KEY (novel_id, chapter_number) REFERENCES chapters(novel_id, number) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_chapter_generation_metrics_novel
+    ON chapter_generation_metrics(novel_id, chapter_number);
+
 -- ========== 语义化快照系统（战役三 Task 12）==========
 -- Git-like 版本控制，只存指针不存正文深拷贝
 CREATE TABLE IF NOT EXISTS novel_snapshots (

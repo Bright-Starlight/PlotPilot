@@ -14,6 +14,8 @@ export interface NovelDTO {
   title: string
   author: string
   target_chapters: number
+  target_words_per_chapter?: number
+  premise?: string
   stage: string
   chapters: ChapterDTO[]
   total_word_count: number
@@ -45,6 +47,8 @@ export const novelApi = {
     title: string
     author: string
     target_chapters: number
+    target_words_per_chapter?: number
+    premise?: string
   }) => apiClient.post<NovelDTO>('/novels', data) as Promise<NovelDTO>,
 
   /**
@@ -68,6 +72,7 @@ export const novelApi = {
     title?: string
     author?: string
     target_chapters?: number
+    target_words_per_chapter?: number
     premise?: string
   }) => apiClient.put<NovelDTO>(`/novels/${novelId}`, data) as Promise<NovelDTO>,
 

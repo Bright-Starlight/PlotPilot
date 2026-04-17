@@ -365,14 +365,15 @@
 </template>
 
 <script setup lang="ts">
-import { h, ref, onMounted, computed, nextTick } from 'vue'
+import { defineAsyncComponent, h, ref, onMounted, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage, NIcon } from 'naive-ui'
 import { novelApi, type NovelDTO } from '../api/novel'
 import StatsSidebar from '@/components/stats/StatsSidebar.vue'
 import NovelSetupGuide from '@/components/onboarding/NovelSetupGuide.vue'
-import LLMSettingsModal from '@/components/LLMSettingsModal.vue'
 import { useStatsStore } from '@/stores/statsStore'
+
+const LLMSettingsModal = defineAsyncComponent(() => import('@/components/LLMSettingsModal.vue'))
 
 // Icons
 const IconSpark = () =>
@@ -549,6 +550,7 @@ const handleCreate = async () => {
       title: title,
       author: '作者',
       target_chapters: targetChapters,
+      target_words_per_chapter: newBook.value.words || 2500,
       premise: newBook.value.premise,
     }
 

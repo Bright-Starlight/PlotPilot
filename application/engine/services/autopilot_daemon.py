@@ -24,6 +24,7 @@ from application.engine.services.background_task_service import BackgroundTaskSe
 from application.workflows.auto_novel_generation_workflow import AutoNovelGenerationWorkflow
 from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
 from application.engine.services.style_constraint_builder import build_style_summary
+from application.engine.services.word_control_service import effective_length
 from domain.novel.value_objects.chapter_id import ChapterId
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ class AutopilotDaemon:
         aftermath_pipeline: Optional[ChapterAftermathPipeline] = None,
         volume_summary_service=None,
         foreshadowing_repository=None,
+        chapter_generation_metrics_repository=None,
     ):
         self.novel_repository = novel_repository
         self.llm_service = llm_service
@@ -67,6 +69,7 @@ class AutopilotDaemon:
         self.aftermath_pipeline = aftermath_pipeline
         self.volume_summary_service = volume_summary_service
         self.foreshadowing_repository = foreshadowing_repository
+        self.chapter_generation_metrics_repository = chapter_generation_metrics_repository
         
         # 惰性初始化 VolumeSummaryService
         if not self.volume_summary_service and llm_service and story_node_repo:
@@ -536,6 +539,7 @@ class AutopilotDaemon:
 
         chapter_num = next_chapter_node.number
         outline = next_chapter_node.outline or next_chapter_node.description or next_chapter_node.title
+        target_word_count = max(1, int(getattr(novel, "target_words_per_chapter", 3500) or 3500))
 
         if needs_buffer:
             outline = f"【缓冲章：日常过渡】{outline}。主角战后休整，与配角闲聊，展示收获，节奏轻松。"
@@ -592,7 +596,11 @@ class AutopilotDaemon:
         # 5. 节拍放大
         beats = []
         if self.context_builder:
-            beats = self.context_builder.magnify_outline_to_beats(chapter_num, outline, target_chapter_words=3500)
+            beats = self.context_builder.magnify_outline_to_beats(
+                chapter_num,
+                outline,
+                target_chapter_words=target_word_count,
+            )
 
         if not self._is_still_running(novel):
             logger.info(f"[{novel.novel_id}] 用户已停止（节拍拆分后）")
@@ -627,6 +635,10 @@ class AutopilotDaemon:
                         total_beats=len(beats),
                         beat_target_words=int(beat.target_words),
                         voice_anchors=voice_anchors,
+                    )
+                    prompt = self.chapter_workflow.word_control_service.inject_length_requirements(
+                        prompt,
+                        target=target_word_count,
                     )
                     max_tokens = int(beat.target_words * 1.5)
                     cfg = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
@@ -667,6 +679,10 @@ class AutopilotDaemon:
                     style_summary=bundle["style_summary"],
                     voice_anchors=voice_anchors,
                 )
+                prompt = self.chapter_workflow.word_control_service.inject_length_requirements(
+                    prompt,
+                    target=target_word_count,
+                )
                 cfg = GenerationConfig(max_tokens=3000, temperature=0.85)
                 beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
             else:
@@ -686,6 +702,45 @@ class AutopilotDaemon:
             self._flush_novel(novel)
             return
 
+        word_control_metrics = None
+        if use_wf and chapter_content.strip():
+            try:
+                chapter_content, word_control = await self.chapter_workflow._apply_word_control(
+                    content=chapter_content,
+                    outline=outline,
+                    target_word_count=target_word_count,
+                )
+                if word_control is not None:
+                    serialized = self.chapter_workflow._serialize_word_control(word_control)
+                    word_control_metrics = serialized.to_dict() if serialized is not None else None
+                    if word_control_metrics is not None:
+                        word_control_metrics["generated_via"] = "autopilot"
+            except Exception as e:
+                logger.warning(f"字数控制闭环失败（仍继续写作流程）：{e}")
+        elif chapter_content.strip() and self.chapter_workflow:
+            try:
+                check = self.chapter_workflow.word_control_service.check_word_count(
+                    chapter_content,
+                    target_word_count,
+                )
+                word_control_metrics = {
+                    "generated_via": "autopilot",
+                    "target": check.target,
+                    "actual": check.actual,
+                    "tolerance": check.tolerance,
+                    "delta": check.delta,
+                    "status": check.status,
+                    "within_tolerance": check.within_tolerance,
+                    "action": "none",
+                    "expansion_attempts": 0,
+                    "trim_applied": False,
+                    "fallback_used": False,
+                    "min_allowed": check.min_allowed,
+                    "max_allowed": check.max_allowed,
+                }
+            except Exception:
+                word_control_metrics = None
+
         if use_wf and chapter_content.strip():
             try:
                 await self.chapter_workflow.post_process_generated_chapter(
@@ -696,7 +751,13 @@ class AutopilotDaemon:
                 logger.warning(f"post_process_generated_chapter 失败（仍落库）：{e}")
 
         # 7. 章节完成，标记 completed
-        await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="completed")
+        await self._upsert_chapter_content(
+            novel,
+            next_chapter_node,
+            chapter_content,
+            status="completed",
+            generation_metrics=word_control_metrics,
+        )
 
         # 8. 更新计数器，重置节拍索引
         novel.current_auto_chapters = (novel.current_auto_chapters or 0) + 1
@@ -739,6 +800,25 @@ class AutopilotDaemon:
             content,
             drift_result,
         )
+        if self.chapter_generation_metrics_repository:
+            existing_metrics = self.chapter_generation_metrics_repository.get(
+                novel.novel_id.value,
+                chapter_num,
+            )
+            if existing_metrics:
+                existing_metrics["actual"] = effective_length(content)
+                existing_metrics["delta"] = existing_metrics["actual"] - int(existing_metrics.get("target") or 0)
+                existing_metrics["status"] = (
+                    "too_short" if existing_metrics["actual"] < existing_metrics["min_allowed"]
+                    else "too_long" if existing_metrics["actual"] > existing_metrics["max_allowed"]
+                    else "ok"
+                )
+                existing_metrics["within_tolerance"] = existing_metrics["status"] == "ok"
+                self.chapter_generation_metrics_repository.upsert(
+                    novel.novel_id.value,
+                    chapter_num,
+                    existing_metrics,
+                )
 
         # 2. 统一章后管线：叙事/向量、文风（一次）、KG 推断；三元组与伏笔在叙事同步单次 LLM 中落库
         if self.aftermath_pipeline:
@@ -1235,7 +1315,14 @@ class AutopilotDaemon:
         config = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
         return await self._stream_llm_with_stop_watch(prompt, config, novel=novel)
 
-    async def _upsert_chapter_content(self, novel, chapter_node, content: str, status: str):
+    async def _upsert_chapter_content(
+        self,
+        novel,
+        chapter_node,
+        content: str,
+        status: str,
+        generation_metrics: Optional[Dict[str, Any]] = None,
+    ):
         """最小事务：只更新章节内容，不涉及其他表"""
         from domain.novel.entities.chapter import Chapter, ChapterStatus
         from domain.novel.value_objects.novel_id import NovelId
@@ -1263,6 +1350,12 @@ class AutopilotDaemon:
                 status=ChapterStatus(status)
             )
             self.chapter_repository.save(chapter)
+        if generation_metrics and self.chapter_generation_metrics_repository:
+            self.chapter_generation_metrics_repository.upsert(
+                novel.novel_id.value,
+                chapter_node.number,
+                generation_metrics,
+            )
 
     async def _find_next_unwritten_chapter_async(self, novel):
         """找到下一个未写的章节节点"""

@@ -55,6 +55,16 @@ export interface BookStats {
   avg_chapter_words: number;
   completion_rate: number;
   last_updated: string;
+  generation_quality?: {
+    total_measured: number;
+    within_tolerance_count: number;
+    pass_rate: number | null;
+    expansion_trigger_count: number;
+    trim_trigger_count: number;
+    expansion_trigger_rate: number | null;
+    trim_trigger_rate: number | null;
+    avg_expansion_attempts: number;
+  } | null;
 }
 
 export interface ChapterStats {

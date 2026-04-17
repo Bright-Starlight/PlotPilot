@@ -67,6 +67,7 @@ export interface PlotArcDTO {
 export interface GenerateChapterWithContextPayload {
   chapter_number: number
   outline: string
+  target_word_count?: number
   scene_director_result?: Record<string, unknown>
 }
 
@@ -121,8 +122,26 @@ export interface GenerateChapterWorkflowResponse {
   content: string
   consistency_report: ConsistencyReportDTO
   token_count: number
+  target_word_count?: number
+  actual_word_count?: number
+  word_control?: WordControlDTO
   style_warnings?: StyleWarning[]
   ghost_annotations?: unknown[]
+}
+
+export interface WordControlDTO {
+  target: number
+  actual: number
+  tolerance: number
+  delta: number
+  status: 'ok' | 'too_short' | 'too_long'
+  within_tolerance: boolean
+  action: 'none' | 'expanded' | 'trimmed'
+  expansion_attempts: number
+  trim_applied: boolean
+  fallback_used: boolean
+  min_allowed: number
+  max_allowed: number
 }
 
 export interface ChunkStats {
@@ -134,7 +153,8 @@ export interface ChunkStats {
 export type GenerateChapterStreamEvent =
   | { type: 'phase'; phase: 'planning' | 'context' | 'llm' | 'post' }
   | { type: 'chunk'; text: string; stats: ChunkStats }
-  | { type: 'done'; content: string; consistency_report: ConsistencyReportDTO; token_count: number; output_tokens: number; total_tokens: number; chars: number; style_warnings?: StyleWarning[]; ghost_annotations?: unknown[] }
+  | { type: 'done'; content: string; consistency_report: ConsistencyReportDTO; token_count: number; output_tokens: number; total_tokens: number; chars: number; target_word_count?: number; actual_word_count?: number; word_control?: WordControlDTO; style_warnings?: StyleWarning[]; ghost_annotations?: unknown[] }
+  | { type: 'warning'; warning_type: string; message: string; target_word_count?: number; recommended_min?: number; recommended_max?: number }
   | { type: 'error'; message: string }
 
 function parseSseDataLine(line: string): unknown | null {
@@ -211,6 +231,11 @@ export async function consumeGenerateChapterStream(
               content: String(o.content ?? ''),
               consistency_report,
               token_count: Number(o.token_count ?? 0),
+              target_word_count: o.target_word_count != null ? Number(o.target_word_count) : undefined,
+              actual_word_count: o.actual_word_count != null ? Number(o.actual_word_count) : undefined,
+            }
+            if (o.word_control && typeof o.word_control === 'object') {
+              result.word_control = o.word_control as WordControlDTO
             }
             if (Array.isArray(o.style_warnings)) {
               result.style_warnings = o.style_warnings as StyleWarning[]
@@ -228,6 +253,16 @@ export async function consumeGenerateChapterStream(
             handlers.onEvent?.(ev)
             handlers.onDone?.(result)
             return
+          } else if (typ === 'warning') {
+            const ev: GenerateChapterStreamEvent = {
+              type: 'warning',
+              warning_type: String(o.warning_type ?? ''),
+              message: String(o.message ?? ''),
+              target_word_count: o.target_word_count != null ? Number(o.target_word_count) : undefined,
+              recommended_min: o.recommended_min != null ? Number(o.recommended_min) : undefined,
+              recommended_max: o.recommended_max != null ? Number(o.recommended_max) : undefined,
+            }
+            handlers.onEvent?.(ev)
           } else if (typ === 'error') {
             const msg = String(o.message ?? '生成失败')
             const ev: GenerateChapterStreamEvent = { type: 'error', message: msg }

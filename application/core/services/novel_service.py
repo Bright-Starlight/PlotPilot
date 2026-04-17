@@ -11,6 +11,7 @@ from domain.shared.exceptions import EntityNotFoundError
 from application.core.dtos.novel_dto import NovelDTO
 from domain.structure.story_node import StoryNode, NodeType, PlanningStatus, PlanningSource
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
+from infrastructure.persistence.database.sqlite_chapter_generation_metrics_repository import SqliteChapterGenerationMetricsRepository
 
 
 class NovelService:
@@ -24,6 +25,7 @@ class NovelService:
         novel_repository: NovelRepository,
         chapter_repository: ChapterRepository,
         story_node_repository: Optional[StoryNodeRepository] = None,
+        chapter_generation_metrics_repository: Optional[SqliteChapterGenerationMetricsRepository] = None,
     ):
         """初始化服务
 
@@ -35,6 +37,7 @@ class NovelService:
         self.novel_repository = novel_repository
         self.chapter_repository = chapter_repository
         self.story_node_repository = story_node_repository
+        self.chapter_generation_metrics_repository = chapter_generation_metrics_repository
 
     def _hydrate_chapters(self, novel: Novel) -> Novel:
         """用 Chapter 仓储补齐 DTO 所需章节列表。"""
@@ -78,6 +81,7 @@ class NovelService:
         title: str,
         author: str,
         target_chapters: int,
+        target_words_per_chapter: int = 3500,
         premise: str = ""
     ) -> NovelDTO:
         """创建新小说
@@ -97,6 +101,7 @@ class NovelService:
             title=title,
             author=author,
             target_chapters=target_chapters,
+            target_words_per_chapter=target_words_per_chapter,
             premise=premise,
             stage=NovelStage.PLANNING
         )
@@ -264,8 +269,9 @@ class NovelService:
         novel = self.novel_repository.get_by_id(NovelId(novel_id)) or novel
         return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
-    def update_novel(self, novel_id: str, title: Optional[str] = None, author: Optional[str] = None, 
-                     target_chapters: Optional[int] = None, premise: Optional[str] = None) -> NovelDTO:
+    def update_novel(self, novel_id: str, title: Optional[str] = None, author: Optional[str] = None,
+                     target_chapters: Optional[int] = None, premise: Optional[str] = None,
+                     target_words_per_chapter: Optional[int] = None) -> NovelDTO:
         """更新小说基本信息
 
         Args:
@@ -294,6 +300,8 @@ class NovelService:
             novel.target_chapters = target_chapters
         if premise is not None:
             novel.premise = premise
+        if target_words_per_chapter is not None:
+            novel.target_words_per_chapter = target_words_per_chapter
 
         self.novel_repository.save(novel)
         return NovelDTO.from_domain(self._hydrate_chapters(novel))
@@ -375,4 +383,6 @@ class NovelService:
             "completion_rate": completion,
             "stage": novel.stage.value,
             "last_updated": datetime.now(timezone.utc).isoformat(),
+            "generation_quality": self.chapter_generation_metrics_repository.get_book_summary(novel_id)
+            if self.chapter_generation_metrics_repository else None,
         }

@@ -60,12 +60,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import { NTooltip, NSpin, NDropdown, useMessage } from 'naive-ui'
 import { useStatsStore } from '@/stores/statsStore'
 import { novelApi } from '@/api/novel'
-import GlobalLLMEntryButton from '@/components/global/GlobalLLMEntryButton.vue'
-import PromptPlazaEntryButton from '@/components/global/PromptPlazaEntryButton.vue'
+
+const GlobalLLMEntryButton = defineAsyncComponent(() => import('@/components/global/GlobalLLMEntryButton.vue'))
+const PromptPlazaEntryButton = defineAsyncComponent(() => import('@/components/global/PromptPlazaEntryButton.vue'))
 
 const props = defineProps<{
   slug: string
@@ -135,8 +136,10 @@ const stats = computed(() => {
   const formattedWords = totalWords.toLocaleString()
   const formattedCompletionRate = rate.toFixed(DECIMAL_PRECISION)
   const formattedAvgWords = avgWords.toLocaleString()
+  const quality = s.generation_quality
+  const passRate = quality?.pass_rate != null ? `${(quality.pass_rate * 100).toFixed(DECIMAL_PRECISION)}%` : null
 
-  return [
+  const items = [
     {
       key: 'words',
       label: '总字数',
@@ -161,13 +164,25 @@ const stats = computed(() => {
       value: formattedAvgWords,
       tooltip: `每章平均 ${formattedAvgWords} 字`
     },
-    {
+  ]
+
+  if (passRate) {
+    items.push({
+      key: 'word-control-pass-rate',
+      label: '达标率',
+      value: passRate,
+      tooltip: `章节字数落在目标容忍区间的比例。补写触发 ${quality?.expansion_trigger_count ?? 0} 次，裁剪触发 ${quality?.trim_trigger_count ?? 0} 次`
+    })
+  }
+
+  items.push({
       key: 'updated',
       label: '最后更新',
       value: formatDate(s.last_updated),
       tooltip: `最后更新时间：${s.last_updated}`
-    }
-  ]
+    })
+
+  return items
 })
 
 function formatStatsError(err: unknown): string {

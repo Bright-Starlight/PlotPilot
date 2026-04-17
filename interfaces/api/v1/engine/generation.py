@@ -83,6 +83,7 @@ class GenerateChapterRequest(BaseModel):
     """生成章节请求"""
     chapter_number: int = Field(..., gt=0, description="章节号（必须 > 0）")
     outline: str = Field(..., min_length=1, description="章节大纲")
+    target_word_count: Optional[int] = Field(None, gt=0, description="目标字数")
     scene_director_result: Optional[dict] = Field(None, description="可选的场记分析结果")
 
 
@@ -250,7 +251,8 @@ async def generate_chapter_stream(
             novel_id=novel_id,
             chapter_number=request.chapter_number,
             outline=request.outline,
-            scene_director=scene_director
+            scene_director=scene_director,
+            target_word_count=request.target_word_count,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 

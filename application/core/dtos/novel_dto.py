@@ -75,6 +75,7 @@ class NovelDTO:
     premise: str
     chapters: List[ChapterDTO]
     total_word_count: int
+    target_words_per_chapter: int = 3500
     has_bible: bool = False
     has_outline: bool = False
     autopilot_status: str = "stopped"
@@ -104,6 +105,7 @@ class NovelDTO:
             premise=getattr(novel, 'premise', ''),  # 兼容旧数据
             chapters=chapters,
             total_word_count=novel.get_total_word_count().value,
+            target_words_per_chapter=getattr(novel, 'target_words_per_chapter', 3500),
             autopilot_status=autopilot_status,
             auto_approve_mode=getattr(novel, 'auto_approve_mode', False),
         )

@@ -26,6 +26,7 @@
                   :slug="slug"
                   :book-title="bookTitle"
                   :chapters="chapters"
+                  :target-words-per-chapter="targetWordsPerChapter"
                   :current-chapter-id="currentChapterId"
                   :chapter-content="chapterContent"
                   :chapter-loading="chapterLoading"
@@ -41,6 +42,7 @@
                   :bible-key="biblePanelKey"
                   :current-chapter="currentChapter"
                   @update:current-panel="onSettingsPanelChange"
+                  @novel-updated="handleChapterUpdated"
                 />
               </template>
             </n-split>
@@ -63,18 +65,19 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, computed, ref, watch, type ComponentPublicInstance } from 'vue'
+import { defineAsyncComponent, onMounted, computed, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useRoute } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useWorkbench } from '../composables/useWorkbench'
 import { useStatsStore } from '../stores/statsStore'
 import { useWorkbenchRefreshStore } from '../stores/workbenchRefreshStore'
-import StatsTopBar from '../components/stats/StatsTopBar.vue'
-import ChapterList from '../components/workbench/ChapterList.vue'
-import WorkArea from '../components/workbench/WorkArea.vue'
-import SettingsPanel from '../components/workbench/SettingsPanel.vue'
-import ActPlanningModal from '../components/workbench/ActPlanningModal.vue'
-import LLMSettingsModal from '../components/LLMSettingsModal.vue'
+
+const StatsTopBar = defineAsyncComponent(() => import('../components/stats/StatsTopBar.vue'))
+const ChapterList = defineAsyncComponent(() => import('../components/workbench/ChapterList.vue'))
+const WorkArea = defineAsyncComponent(() => import('../components/workbench/WorkArea.vue'))
+const SettingsPanel = defineAsyncComponent(() => import('../components/workbench/SettingsPanel.vue'))
+const ActPlanningModal = defineAsyncComponent(() => import('../components/workbench/ActPlanningModal.vue'))
+const LLMSettingsModal = defineAsyncComponent(() => import('../components/LLMSettingsModal.vue'))
 
 const route = useRoute()
 const message = useMessage()
@@ -122,6 +125,7 @@ const {
   currentChapterId,
   chapterContent,
   chapterLoading,
+  targetWordsPerChapter,
   setRightPanel,
   loadDesk,
   goHome,
