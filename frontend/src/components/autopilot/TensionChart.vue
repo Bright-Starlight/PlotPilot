@@ -7,14 +7,8 @@
       <n-button v-if="tensionData.length > 0" size="tiny" quaternary @click="loadTensionData">↻</n-button>
     </template>
 
-    <!-- 加载态 -->
-    <div v-if="loading" class="chart-container chart-loading">
-      <n-spin size="small" />
-      <span class="chart-loading-text">加载张力曲线…</span>
-    </div>
-
     <!-- 空状态 -->
-    <div v-else-if="!tensionData.length" class="chart-container chart-empty">
+    <div v-if="!loading && !tensionData.length" class="chart-container chart-empty">
       <n-empty description="暂无张力数据" size="small">
         <template #icon><span style="font-size:36px">📈</span></template>
         <template #extra>
@@ -24,7 +18,13 @@
     </div>
 
     <!-- 图表 -->
-    <div v-else ref="chartRef" class="chart-container" />
+    <div v-else class="chart-shell">
+      <div ref="chartRef" class="chart-container" />
+      <div v-if="loading" class="chart-overlay chart-loading">
+        <n-spin size="small" />
+        <span class="chart-loading-text">加载张力曲线…</span>
+      </div>
+    </div>
 
     <!-- 低张力警告 -->
     <n-alert v-if="hasLowTension && !loading" type="warning" :show-icon="false" style="margin-top: 8px; font-size: 12px">
@@ -49,9 +49,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import * as echarts from 'echarts'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { init, use, type ECharts, type EChartsCoreOption } from 'echarts/core'
+import { LineChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent, MarkLineComponent, MarkPointComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 import { monitorApi } from '../../api/monitor'
+
+use([LineChart, GridComponent, TooltipComponent, MarkLineComponent, MarkPointComponent, CanvasRenderer])
 
 interface TensionData {
   chapter_number: number
@@ -74,7 +79,7 @@ const tensionData = ref<TensionData[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 
-let chartInstance: echarts.ECharts | null = null
+let chartInstance: ECharts | null = null
 
 // 张力警戒线
 const tensionThreshold = computed(() => props.threshold ?? 5.0)
@@ -122,14 +127,17 @@ async function loadTensionData() {
 
     // 等 DOM 更新后再渲染图表（解决第五章后不显示的关键）
     await nextTick()
-    // 再等一帧确保容器尺寸已计算
-    setTimeout(() => renderChart(), 50)
   } catch (err: any) {
     console.error('[TensionChart] Failed to load:', err)
     error.value = err?.message || String(err)
     tensionData.value = []
   } finally {
     loading.value = false
+    await nextTick()
+    // 再等一帧确保容器尺寸已计算
+    if (tensionData.value.length > 0) {
+      setTimeout(() => renderChart(), 50)
+    }
   }
 }
 
@@ -145,14 +153,19 @@ function renderChart() {
     return
   }
 
+  if (chartInstance && chartInstance.getDom() !== chartRef.value) {
+    chartInstance.dispose()
+    chartInstance = null
+  }
+
   if (!chartInstance) {
-    chartInstance = echarts.init(chartRef.value)
+    chartInstance = init(chartRef.value)
   }
 
   const chapterNumbers = tensionData.value.map((d) => d.chapter_number)
   const tensionScores = tensionData.value.map((d) => d.tension_score)
 
-  const option: echarts.EChartsOption = {
+  const option: EChartsCoreOption = {
     grid: {
       left: 36,
       right: 16,
@@ -205,10 +218,17 @@ function renderChart() {
           borderColor: '#fff',
         },
         areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(24, 160, 88, 0.25)' },
-            { offset: 1, color: 'rgba(24, 160, 88, 0.02)' },
-          ]),
+          color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: 'rgba(24, 160, 88, 0.25)' },
+              { offset: 1, color: 'rgba(24, 160, 88, 0.02)' },
+            ],
+          },
         },
         markLine: {
           silent: true,
@@ -288,16 +308,6 @@ function handleResize() {
 // ==================== 监听 ====================
 watch(() => props.novelId, () => void loadTensionData())
 
-// 数据变化时重新渲染（防抖）
-let resizeTimer: ReturnType<typeof setTimeout> | null = null
-watch(tensionData, () => {
-  if (resizeTimer) clearTimeout(resizeTimer)
-  resizeTimer = setTimeout(() => {
-    renderChart()
-    resizeTimer = null
-  }, 100)
-})
-
 // ==================== 生命周期 ====================
 onMounted(() => {
   void loadTensionData()
@@ -306,13 +316,16 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
-  if (resizeTimer) clearTimeout(resizeTimer)
   chartInstance?.dispose()
   chartInstance = null
 })
 </script>
 
 <style scoped>
+.chart-shell {
+  position: relative;
+}
+
 .chart-container {
   width: 100%;
   height: 200px;
@@ -327,6 +340,13 @@ onUnmounted(() => {
   gap: 8px;
   background: rgba(0, 0, 0, 0.02);
   border-radius: 6px;
+}
+
+.chart-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  backdrop-filter: blur(1px);
 }
 
 .chart-loading-text {
