@@ -205,9 +205,6 @@ const form = ref({
   structure: { parts: 3, volumes_per_part: 3, acts_per_volume: 3 },
 })
 
-// Macro result polling timeout (2 minutes)
-const MACRO_TIMEOUT_MS = 2 * 60 * 1000
-
 // 计算总幕数
 const totalActs = computed(() =>
   form.value.structure.parts * form.value.structure.volumes_per_part * form.value.structure.acts_per_volume
@@ -308,13 +305,7 @@ const pollMacroProgress = async () => {
 }
 
 const waitForMacroResult = async (): Promise<MacroPlanResultPayload> => {
-  const deadline = Date.now() + MACRO_TIMEOUT_MS
   while (true) {
-    if (Date.now() >= deadline) {
-      stopProgressPolling()
-      throw new Error('macro result timeout')
-    }
-
     const [progressRes, resultRes] = await Promise.all([
       planningApi.getMacroProgress(props.novelId),
       planningApi.getMacroResult(props.novelId),

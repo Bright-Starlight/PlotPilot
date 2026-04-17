@@ -117,25 +117,10 @@ class EmbeddingConfigService:
             return
         raise AttributeError("Database object does not support commit")
 
-    def _execute(self, sql: str, params: tuple = ()):
-        db = self._get_db()
-        if hasattr(db, "execute"):
-            return db.execute(sql, params)
-        raise AttributeError("Injected db_connection must provide execute(sql, params)")
-
-    def _commit(self) -> None:
-        db = self._get_db()
-        if hasattr(db, "commit"):
-            db.commit()
-            return
-        if hasattr(db, "get_connection"):
-            db.get_connection().commit()
-            return
-        raise AttributeError("Injected db_connection must provide commit() or get_connection().commit()")
-
     def _ensure_row(self) -> None:
         """确保存在默认配置行（幂等）。"""
-        row = self._execute(
+        db = self._get_db()
+        row = db.execute(
             "SELECT id FROM embedding_config WHERE id = ? LIMIT 1",
             ("default",),
         ).fetchone()
@@ -143,7 +128,7 @@ class EmbeddingConfigService:
             return
         now = datetime.now().isoformat()
         defaults = self._default_values()
-        self._execute("""
+        db.execute("""
             INSERT OR IGNORE INTO embedding_config
             (id, mode, api_key, base_url, model, use_gpu, model_path, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -158,13 +143,14 @@ class EmbeddingConfigService:
             now,
             now,
         ))
-        self._commit()
+        self._commit_db(db)
         logger.info("EmbeddingConfigService: 已初始化默认嵌入配置")
 
     def get_config(self) -> EmbeddingConfigModel:
         """获取当前嵌入配置。"""
         self._ensure_row()
-        row = self._execute(
+        db = self._get_db()
+        row = db.execute(
             "SELECT * FROM embedding_config WHERE id = ? LIMIT 1",
             ("default",),
         ).fetchone()
@@ -183,6 +169,7 @@ class EmbeddingConfigService:
             更新后的配置
         """
         self._ensure_row()
+        db = self._get_db()
 
         # 构建动态 UPDATE
         allowed = {"mode", "api_key", "base_url", "model", "use_gpu", "model_path"}
@@ -205,8 +192,8 @@ class EmbeddingConfigService:
         params.append("default")  # WHERE id = ?
 
         sql = f"UPDATE embedding_config SET {', '.join(set_clauses)} WHERE id = ?"
-        self._execute(sql, tuple(params))
-        self._commit()
+        db.execute(sql, params)
+        self._commit_db(db)
 
         logger.info("EmbeddingConfigService: 配置已更新，字段: %s", list(kwargs.keys()))
         return self.get_config()

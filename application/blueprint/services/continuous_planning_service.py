@@ -29,14 +29,6 @@ _macro_plan_result_store: Dict[str, Dict] = {}
 
 
 def _sanitize_llm_json_output(raw: str) -> str:
-    """清除 LLM 输出中的 ANSI 颜色码和 thinking 标签，提取 JSON 块。
-
-    Args:
-        raw: LLM 原始输出
-
-    Returns:
-        清理后的 JSON 字符串
-    """
     content = (raw or "").strip()
     content = re.sub(r"\x1b\[[0-9;]*m", "", content)
     content = re.sub(r"<think\|?>.*?</think\|?>", "", content, flags=re.DOTALL)
@@ -49,14 +41,6 @@ def _sanitize_llm_json_output(raw: str) -> str:
 
 
 def _extract_outer_json_value(text: str) -> str:
-    """从文本中提取最外层 JSON 对象或数组。
-
-    Args:
-        text: 包含 JSON 的文本
-
-    Returns:
-        提取的 JSON 字符串
-    """
     obj_start = text.find("{")
     arr_start = text.find("[")
     if obj_start != -1:
@@ -96,14 +80,6 @@ def _extract_outer_json_value(text: str) -> str:
 
 
 def _repair_json_string(text: str) -> str:
-    """修复不完整的 JSON 字符串，补充缺失的闭合括号。
-
-    Args:
-        text: 可能不完整的 JSON 字符串
-
-    Returns:
-        修复后的 JSON 字符串
-    """
     text = text.strip()
     if not text:
         return text
@@ -188,14 +164,6 @@ __all__ = ['ContinuousPlanningService', 'MergeConflictException']
 
 
 def get_macro_plan_progress(novel_id: str) -> Dict:
-    """获取宏观规划的实时进度。
-
-    Args:
-        novel_id: 小说 ID
-
-    Returns:
-        进度信息字典，包含 status/current/total/percent/message
-    """
     return _macro_plan_progress_store.get(novel_id, {
         "status": "idle",
         "current": 0,
@@ -206,14 +174,6 @@ def get_macro_plan_progress(novel_id: str) -> Dict:
 
 
 def get_macro_plan_result(novel_id: str) -> Dict:
-    """获取宏观规划的最终结果。
-
-    Args:
-        novel_id: 小说 ID
-
-    Returns:
-        结果信息字典，包含 ready/result/error
-    """
     return _macro_plan_result_store.get(novel_id, {
         "ready": False,
         "result": None,
@@ -623,13 +583,10 @@ class ContinuousPlanningService:
         }
 
     def store_macro_plan_error(self, novel_id: str, error: str) -> None:
-        # ready=True means the result is available for reading (even if it's an error)
-        # Callers should check success=False or error!=None to distinguish error from success
         _macro_plan_result_store[novel_id] = {
-            "ready": True,
+            "ready": False,
             "result": None,
             "error": error,
-            "success": False,
         }
 
     def _evaluate_macro_plan_quality(

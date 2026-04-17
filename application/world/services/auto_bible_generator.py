@@ -27,151 +27,6 @@ USER_PROMPT_SUFFIX = """
 """
 
 
-def _sanitize_llm_json_output(raw: str) -> str:
-    """清除 LLM 输出中的 ANSI 颜色码和 thinking 标签，提取 JSON 块。
-
-    Args:
-        raw: LLM 原始输出
-
-    Returns:
-        清理后的 JSON 字符串
-    """
-    content = (raw or "").strip()
-    content = re.sub(r"\x1b\[[0-9;]*m", "", content)
-    content = re.sub(r"<think\|?>.*?</think\|?>", "", content, flags=re.DOTALL)
-    content = re.sub(r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL)
-    if "```json" in content:
-        content = content.split("```json", 1)[1].split("```", 1)[0]
-    elif "```" in content:
-        content = content.split("```", 1)[1].split("```", 1)[0]
-    return content.strip()
-
-
-def _extract_outer_json_object(text: str) -> str:
-    """从文本中提取最外层 JSON 对象。
-
-    Args:
-        text: 包含 JSON 的文本
-
-    Returns:
-        提取的 JSON 对象字符串
-    """
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1:
-        return text
-    if end != -1 and end > start:
-        return text[start : end + 1]
-    return text[start:]
-
-
-def _repair_json_string(text: str) -> str:
-    """修复不完整的 JSON 字符串，补充缺失的闭合括号。
-
-    Args:
-        text: 可能不完整的 JSON 字符串
-
-    Returns:
-        修复后的 JSON 字符串
-    """
-    text = text.strip()
-    if not text:
-        return text
-
-    try:
-        json.loads(text)
-        return text
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    def _close_json(s: str) -> str:
-        s = s.strip()
-        if not s:
-            return "{}"
-
-        in_string = False
-        escape = False
-        stack = []
-        result = []
-
-        for ch in s:
-            if escape:
-                result.append(ch)
-                escape = False
-                continue
-            if ch == "\\" and in_string:
-                result.append(ch)
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                result.append(ch)
-                continue
-            if in_string:
-                result.append(ch)
-                continue
-            if ch == "{":
-                stack.append("}")
-                result.append(ch)
-                continue
-            if ch == "[":
-                stack.append("]")
-                result.append(ch)
-                continue
-            if ch in "}]":
-                if stack and stack[-1] == ch:
-                    stack.pop()
-                result.append(ch)
-                continue
-            result.append(ch)
-
-        if in_string:
-            result.append('"')
-
-        repaired = "".join(result).rstrip()
-        repaired = repaired.rstrip(',')
-        while stack:
-            repaired = repaired.rstrip(',')
-            repaired += stack.pop()
-        return repaired
-
-    candidate = text
-    retries = 15
-    while retries > 0 and candidate:
-        repaired = _close_json(candidate)
-        try:
-            json.loads(repaired)
-            return repaired
-        except json.JSONDecodeError:
-            last_comma = candidate.rfind(",")
-            if last_comma == -1:
-                break
-            candidate = candidate[:last_comma]
-        retries -= 1
-    return _close_json(text)
-
-
-def _parse_llm_json_to_dict(raw: str) -> Dict[str, Any]:
-    """解析 LLM 返回的原始字符串为字典。
-
-    Args:
-        raw: LLM 原始输出
-
-    Returns:
-        解析后的字典
-
-    Raises:
-        json.JSONDecodeError: 解析失败时
-    """
-    cleaned = _sanitize_llm_json_output(raw)
-    cleaned = _extract_outer_json_object(cleaned)
-    cleaned = _repair_json_string(cleaned)
-    data = json.loads(cleaned)
-    if not isinstance(data, dict):
-        raise json.JSONDecodeError("Root node is not a JSON object", cleaned, 0)
-    return data
-
-
 def _infer_character_importance(char_data: Dict[str, Any]) -> str:
     """与前端人物关系图 importance 一致：primary / secondary / minor。"""
     role = str(char_data.get("role") or "").strip()
@@ -201,14 +56,6 @@ def _map_location_kind(raw_type: str) -> str:
 
 
 def _default_location_importance(_loc_data: Dict[str, Any]) -> str:
-    """返回地点的默认重要性等级。
-
-    Args:
-        _loc_data: 地点数据字典
-
-    Returns:
-        重要性等级，默认为 "normal"
-    """
     return "normal"
 
 
@@ -259,20 +106,11 @@ class AutoBibleGenerator:
             if normalized_raw_id and normalized_raw_id not in raw_to_final:
                 raw_to_final[normalized_raw_id] = location_id
 
-            name = loc_data.get("name", "")
-            description = loc_data.get("description", "")
-            if not name or not description:
-                logger.warning(
-                    "Location entry missing required fields during normalization: raw_id=%s, name_present=%s, description_present=%s",
-                    raw_id,
-                    bool(name),
-                    bool(description),
-                )
             prepared.append(
                 {
                     "location_id": location_id,
-                    "name": name,
-                    "description": description,
+                    "name": loc_data["name"],
+                    "description": loc_data["description"],
                     "location_type": loc_data.get("type", "场景"),
                     "connections": loc_data.get("connections", []),
                     "raw_parent_id": loc_data.get("parent_id"),
@@ -629,7 +467,6 @@ JSON 格式（不要有其他文字）：
                     name=loc_data["name"],
                     description=loc_data["description"],
                     location_type=loc_data["location_type"],
-                    connections=loc_data.get("connections"),
                     parent_id=loc_data["parent_id"],
                 )
                 logger.info(f"Location saved: {loc_data['location_id']}")

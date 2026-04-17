@@ -119,12 +119,8 @@ base_library.zip
 
 # ── PlotPilot 残留 ──
 PlotPilot-master/
+llm_profiles.json
 
 # ── 锁文件（运行时生成） ──
 aitext.lock
 scripts/aitext.lock
-
-# ── 其他 ──
-llm_profiles.json
-AGENTS.md
-
