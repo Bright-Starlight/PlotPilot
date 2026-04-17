@@ -25,6 +25,7 @@ from infrastructure.persistence.database.sqlite_storyline_repository import Sqli
 from infrastructure.persistence.database.sqlite_plot_arc_repository import SqlitePlotArcRepository
 from infrastructure.persistence.database.sqlite_voice_vault_repository import SqliteVoiceVaultRepository
 from infrastructure.persistence.database.sqlite_voice_fingerprint_repository import SQLiteVoiceFingerprintRepository
+from infrastructure.persistence.database.sqlite_chapter_generation_metrics_repository import SqliteChapterGenerationMetricsRepository
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.database.sqlite_cast_repository import SqliteCastRepository
 from infrastructure.persistence.database.sqlite_foreshadowing_repository import SqliteForeshadowingRepository
@@ -62,19 +63,15 @@ logger = logging.getLogger(__name__)
 _storage = None
 
 
-def _anthropic_api_key() -> Optional[str]:
-    """优先 ANTHROPIC_API_KEY，否则 ANTHROPIC_AUTH_TOKEN（与部分代理/IDE 配置命名一致）。"""
-    raw = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")
-    if raw is None:
-        return None
-    key = raw.strip()
-    return key or None
+
+@lru_cache
+def get_llm_control_service() -> LLMControlService:
+    return LLMControlService()
 
 
-def _anthropic_base_url() -> Optional[str]:
-    u = os.getenv("ANTHROPIC_BASE_URL")
-    return u.strip() if u and u.strip() else None
-
+@lru_cache
+def get_llm_provider_factory() -> LLMProviderFactory:
+    return LLMProviderFactory(get_llm_control_service())
 
 
 def llm_runtime_is_mock(llm_service: Optional[LLMService] = None) -> bool:
@@ -162,6 +159,12 @@ def get_foreshadowing_repository() -> SqliteForeshadowingRepository:
     return SqliteForeshadowingRepository(get_database())
 
 
+def get_custom_skill_repository():
+    """获取自定义增强技能仓储"""
+    from infrastructure.persistence.database.sqlite_custom_skill_repository import SqliteCustomSkillRepository
+    return SqliteCustomSkillRepository(get_database())
+
+
 def get_snapshot_service():
     """语义快照服务（novel_snapshots；用于编年史 BFF 与回滚）。"""
     from application.snapshot.services.snapshot_service import SnapshotService
@@ -204,7 +207,8 @@ def get_novel_service() -> NovelService:
     return NovelService(
         get_novel_repository(),
         get_chapter_repository(),
-        get_story_node_repository()
+        get_story_node_repository(),
+        SqliteChapterGenerationMetricsRepository(get_database()),
     )
 
 
@@ -220,7 +224,8 @@ def get_chapter_service() -> ChapterService:
     return ChapterService(
         get_chapter_repository(), 
         get_novel_repository(),
-        review_repo
+        review_repo,
+        SqliteChapterGenerationMetricsRepository(get_database()),
     )
 
 
@@ -887,4 +892,61 @@ def get_foreshadow_ledger_service():
     """
     from application.analyst.services.foreshadow_ledger_service import ForeshadowLedgerService
     return ForeshadowLedgerService(get_foreshadowing_repository())
+
+
+# ──────────────────────────────────────────────────────────────
+# 以下工厂函数补全之前缺失的依赖，消除路由层直接 import infrastructure 的违规
+# ──────────────────────────────────────────────────────────────
+
+def get_triple_repository():
+    """获取三元组仓储（TripleRepository）"""
+    from infrastructure.persistence.database.triple_repository import TripleRepository
+    return TripleRepository()
+
+
+def get_worldbuilding_repository():
+    """获取世界观仓储（WorldbuildingRepository）"""
+    from infrastructure.persistence.database.worldbuilding_repository import WorldbuildingRepository
+    from application.paths import get_db_path
+    return WorldbuildingRepository(get_db_path())
+
+
+def get_worldbuilding_service():
+    """获取世界观服务（WorldbuildingService）"""
+    from application.world.services.worldbuilding_service import WorldbuildingService
+    return WorldbuildingService(get_worldbuilding_repository())
+
+
+def get_prompt_manager():
+    """获取提示词管理器（PromptManager）"""
+    from infrastructure.ai.prompt_manager import get_prompt_manager as _get_pm
+    return _get_pm()
+
+
+def get_knowledge_graph_service():
+    """获取知识图谱推断服务（KnowledgeGraphService）"""
+    from application.world.services.knowledge_graph_service import KnowledgeGraphService
+    from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
+    from application.paths import get_db_path
+    db_path = get_db_path()
+    return KnowledgeGraphService(
+        get_triple_repository(),
+        ChapterElementRepository(db_path),
+        get_story_node_repository(),
+    )
+
+
+def get_continuous_planning_service():
+    """获取 AI 连续规划服务（ContinuousPlanningService）"""
+    from application.blueprint.services.continuous_planning_service import ContinuousPlanningService
+    from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
+    from application.paths import get_db_path
+    db_path = get_db_path()
+    return ContinuousPlanningService(
+        story_node_repo=get_story_node_repository(),
+        chapter_element_repo=ChapterElementRepository(db_path),
+        llm_service=get_llm_service(),
+        bible_service=get_bible_service(),
+        chapter_repository=get_chapter_repository(),
+    )
 
