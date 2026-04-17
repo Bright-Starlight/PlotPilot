@@ -8,10 +8,12 @@ aitex 通用工具函数
 
 import sys
 import os
+import re
 import socket
 import subprocess
 import shutil
 import time
+import platform
 
 # ── 当 tkinter 可用时使用隐藏窗口标志，否则为 0 ──
 try:
@@ -56,10 +58,13 @@ def get_proj_dir():
 
 
 def get_venv_python(proj_dir=None):
-    """返回虚拟环境 python.exe 路径，不存在则返回 None"""
+    """返回虚拟环境 python 路径，不存在则返回 None（跨平台）"""
     if proj_dir is None:
         proj_dir = get_proj_dir()
-    p = os.path.join(proj_dir, ".venv", "Scripts", "python.exe")
+    if platform.system() == "Windows":
+        p = os.path.join(proj_dir, ".venv", "Scripts", "python.exe")
+    else:
+        p = os.path.join(proj_dir, ".venv", "bin", "python")
     return p if os.path.exists(p) else None
 
 
@@ -139,14 +144,21 @@ def remove_lock(proj_dir=None):
 
 
 def is_process_alive(pid):
-    """检查进程是否存活（Windows tasklist）"""
+    """检查进程是否存活（跨平台）"""
     try:
-        proc = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True, text=True,
-            creationflags=NO_WIN,
-        )
-        return str(pid) in proc.stdout
+        if platform.system() == "Windows":
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True,
+                creationflags=NO_WIN,
+            )
+            return str(pid) in proc.stdout
+        else:
+            import signal
+            os.kill(pid, 0)
+            return True
+    except (ProcessLookupError, PermissionError):
+        return False
     except Exception:
         return False
 

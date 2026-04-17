@@ -133,7 +133,7 @@ class BackendLauncher:
 
         # 阻塞等待退出
         self.proc.wait()
-        from .utils import remove_lock
+        from utils import remove_lock
         remove_lock()
         self._log("服务已停止", "warn")
         return True
