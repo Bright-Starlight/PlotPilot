@@ -49,7 +49,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watchEffect, onMounted, onUnmounted, nextTick } from 'vue'
 import { init, use, type ECharts, type EChartsCoreOption } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, MarkLineComponent, MarkPointComponent } from 'echarts/components'
@@ -133,12 +133,20 @@ async function loadTensionData() {
     tensionData.value = []
   } finally {
     loading.value = false
-    await nextTick()
-    // 再等一帧确保容器尺寸已计算
-    if (tensionData.value.length > 0) {
-      setTimeout(() => renderChart(), 50)
-    }
+    void tryRenderChart()
   }
+}
+
+async function tryRenderChart() {
+  await nextTick()
+  if (loading.value || tensionData.value.length === 0 || !chartRef.value) {
+    return
+  }
+  requestAnimationFrame(() => {
+    if (!loading.value && tensionData.value.length > 0 && chartRef.value) {
+      renderChart()
+    }
+  })
 }
 
 // ==================== 渲染 ====================
@@ -306,11 +314,14 @@ function handleResize() {
 }
 
 // ==================== 监听 ====================
-watch(() => props.novelId, () => void loadTensionData())
+watchEffect(() => {
+  const novelId = props.novelId
+  if (!novelId) return
+  void loadTensionData()
+})
 
 // ==================== 生命周期 ====================
 onMounted(() => {
-  void loadTensionData()
   window.addEventListener('resize', handleResize)
 })
 
