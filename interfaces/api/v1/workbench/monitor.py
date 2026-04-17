@@ -95,16 +95,30 @@ async def _backfill_tension_scores_if_needed(novel_id: str, chapters: List[Any],
                     dims.pacing_tension,
                 )
             ):
-                ch.update_tension_dimensions(dims)
-                chapter_repo.save(ch)
-                changed = True
-                logger.info(
-                    "监控接口懒回填张力 novel=%s ch=%s composite=%.1f",
-                    novel_id,
-                    ch.number,
-                    dims.composite_score,
-                )
-            prev_tension = float(dims.composite_score)
+                update_if_default = getattr(chapter_repo, "update_tension_dimensions_if_default", None)
+                if callable(update_if_default):
+                    saved = bool(update_if_default(novel_id, ch.number, dims))
+                else:
+                    ch.update_tension_dimensions(dims)
+                    chapter_repo.save(ch)
+                    saved = True
+
+                if saved:
+                    ch.update_tension_dimensions(dims)
+                    changed = True
+                    logger.info(
+                        "监控接口懒回填张力 novel=%s ch=%s composite=%.1f",
+                        novel_id,
+                        ch.number,
+                        dims.composite_score,
+                    )
+                else:
+                    refreshed = chapter_repo.get_by_novel_and_number(NovelId(novel_id), ch.number)
+                    if refreshed is not None:
+                        ch = refreshed
+                        changed = True
+
+            prev_tension = float(getattr(ch, "tension_score", dims.composite_score))
         except Exception as e:
             logger.warning("监控接口张力懒回填失败 novel=%s ch=%s: %s", novel_id, ch.number, e)
 

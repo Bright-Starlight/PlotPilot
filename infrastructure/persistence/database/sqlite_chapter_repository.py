@@ -6,6 +6,7 @@ from datetime import datetime
 from domain.novel.entities.chapter import Chapter
 from domain.novel.value_objects.chapter_id import ChapterId
 from domain.novel.value_objects.novel_id import NovelId
+from domain.novel.value_objects.tension_dimensions import TensionDimensions
 from domain.novel.repositories.chapter_repository import ChapterRepository
 from infrastructure.persistence.database.connection import DatabaseConnection
 
@@ -147,6 +148,47 @@ class SqliteChapterRepository(ChapterRepository):
         self.db.execute(sql, (score, now, novel_id, chapter_number))
         self.db.get_connection().commit()
         logger.info(f"Updated tension score for novel {novel_id} chapter {chapter_number}: {score}")
+
+    def update_tension_dimensions_if_default(
+        self,
+        novel_id: str,
+        chapter_number: int,
+        dimensions: TensionDimensions,
+    ) -> bool:
+        """仅当章节仍保持默认张力值时才写入多维张力。
+
+        这样可以避免监控页重复请求或并发请求时，后来的请求再次覆盖
+        已经落库的张力结果。
+        """
+        sql = """
+            UPDATE chapters
+            SET tension_score = ?,
+                plot_tension = ?,
+                emotional_tension = ?,
+                pacing_tension = ?,
+                updated_at = ?
+            WHERE novel_id = ?
+              AND number = ?
+              AND COALESCE(tension_score, 50.0) = 50.0
+              AND COALESCE(plot_tension, 50.0) = 50.0
+              AND COALESCE(emotional_tension, 50.0) = 50.0
+              AND COALESCE(pacing_tension, 50.0) = 50.0
+        """
+        now = datetime.utcnow().isoformat()
+        cursor = self.db.execute(
+            sql,
+            (
+                dimensions.composite_score,
+                dimensions.plot_tension,
+                dimensions.emotional_tension,
+                dimensions.pacing_tension,
+                now,
+                novel_id,
+                chapter_number,
+            ),
+        )
+        self.db.get_connection().commit()
+        return cursor.rowcount > 0
 
     def _row_to_chapter(self, row: dict) -> Chapter:
         """将数据库行转换为 Chapter 实体"""
