@@ -142,8 +142,6 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import StatCard from './StatCard.vue'
 import { useStatsStore } from '@/stores/statsStore'
-import GlobalLLMEntryButton from '@/components/global/GlobalLLMEntryButton.vue'
-import PromptPlazaEntryButton from '@/components/global/PromptPlazaEntryButton.vue'
 
 defineEmits<{
   (e: 'create-book'): void

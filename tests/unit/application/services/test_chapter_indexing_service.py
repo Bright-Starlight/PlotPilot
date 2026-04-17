@@ -1,4 +1,5 @@
 """ChapterIndexingService 单元测试"""
+import uuid
 import pytest
 from unittest.mock import Mock, AsyncMock
 from application.services.chapter_indexing_service import ChapterIndexingService
@@ -70,7 +71,7 @@ class TestChapterIndexingService:
         # 验证参数
         call_args = mock_vector_store.insert.call_args
         assert call_args.kwargs["collection"] == "novel_novel-123_chunks"
-        assert call_args.kwargs["id"] == "novel-123_ch1_summary"
+        assert call_args.kwargs["id"] == str(uuid.uuid5(uuid.NAMESPACE_DNS, "novel-123_ch1_summary"))
         assert call_args.kwargs["vector"] == expected_vector
 
         # 验证 payload 结构
@@ -108,6 +109,7 @@ class TestChapterIndexingService:
 
         await service.ensure_collection(novel_id)
 
+        mock_vector_store.list_collections.assert_called_once()
         # 验证没有调用 create_collection
         mock_vector_store.create_collection.assert_not_called()
 
@@ -169,7 +171,7 @@ class TestChapterIndexingService:
         # 验证参数
         call_args = mock_vector_store.insert.call_args
         assert call_args.kwargs["collection"] == "novel_novel-123_chunks"
-        assert call_args.kwargs["id"] == "novel-123_ch5_bible"
+        assert call_args.kwargs["id"] == str(uuid.uuid5(uuid.NAMESPACE_DNS, "novel-123_ch5_bible"))
 
         # 验证 payload 结构
         payload = call_args.kwargs["payload"]
@@ -197,7 +199,7 @@ class TestChapterIndexingService:
 
         # 验证 ID 包含 snippet_id
         call_args = mock_vector_store.insert.call_args
-        assert call_args.kwargs["id"] == "novel-123_ch5_bible_location_001"
+        assert call_args.kwargs["id"] == str(uuid.uuid5(uuid.NAMESPACE_DNS, "novel-123_ch5_bible_location_001"))
 
     @pytest.mark.asyncio
     async def test_index_bible_snippet_validates_parameters(self, service):
