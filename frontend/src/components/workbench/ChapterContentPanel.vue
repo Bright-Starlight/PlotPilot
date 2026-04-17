@@ -69,7 +69,7 @@
           </n-tabs>
         </n-card>
 
-        <!-- 融合预览 -->
+        <!-- 融合确认 -->
         <n-card size="small" :bordered="true" class="fusion-card">
           <template #header>
             <span class="card-title">🧩 融合草稿</span>
@@ -77,7 +77,7 @@
           <template #header-extra>
             <n-space :size="6">
               <n-button size="tiny" secondary @click="fusionModalVisible = true">
-                预览
+                融合设置
               </n-button>
               <n-button size="tiny" type="primary" :loading="fusionLoading" @click="createFusionJob">
                 整章融合
@@ -88,6 +88,9 @@
           <n-tabs type="segment" size="small" animated>
             <n-tab-pane name="beats" tab="节拍草稿">
               <n-space vertical :size="8">
+                <n-alert v-if="!beatSheet && chapterPlan" type="info" :show-icon="true" size="small">
+                  当前章节尚未生成真实节拍表，开始融合时会先自动生成。
+                </n-alert>
                 <n-alert v-if="fusionWarningLines.length" type="warning" :show-icon="true" size="small">
                   {{ fusionWarningLines[0] }}
                 </n-alert>
@@ -107,16 +110,19 @@
             </n-tab-pane>
 
             <n-tab-pane name="fusion" tab="融合草稿">
-              <n-empty v-if="!fusionDraft" description="尚未生成融合稿" size="small" />
-              <n-space v-else vertical :size="8">
+              <n-space vertical :size="8">
                 <n-space :size="8" wrap>
-                  <n-tag size="small" type="success" round>{{ fusionState }}</n-tag>
-                  <n-tag size="small" round>重复率 {{ Math.round((fusionDraft.estimated_repeat_ratio || 0) * 100) }}%</n-tag>
+                  <n-tag v-if="fusionJob" size="small" :type="fusionState === 'failed' ? 'error' : fusionState === 'warning' ? 'warning' : 'success'" round>
+                    {{ fusionState }}
+                  </n-tag>
+                  <n-tag v-if="fusionJob" size="small" round>任务 {{ fusionJob.fusion_job_id }}</n-tag>
+                  <n-tag size="small" round>重复率 {{ Math.round((fusionDraft?.estimated_repeat_ratio || 0) * 100) }}%</n-tag>
                 </n-space>
-                <n-alert v-if="fusionDraft.warnings.length" type="warning" :show-icon="true" size="small">
+                <n-empty v-if="!fusionDraft" description="尚未生成融合稿" size="small" />
+                <n-alert v-else-if="fusionDraft.warnings.length" type="warning" :show-icon="true" size="small">
                   {{ fusionDraft.warnings[0] }}
                 </n-alert>
-                <n-input :value="fusionDraft.text" type="textarea" :autosize="{ minRows: 8, maxRows: 20 }" readonly />
+                <n-input v-if="fusionDraft" :value="fusionDraft.text" type="textarea" :autosize="{ minRows: 8, maxRows: 20 }" readonly />
               </n-space>
             </n-tab-pane>
 
@@ -229,22 +235,24 @@
           </n-space>
         </n-card>
 
-        <n-modal v-model:show="fusionModalVisible" preset="card" title="融合预览" style="width: min(760px, 96vw);">
+        <n-modal v-model:show="fusionModalVisible" preset="card" title="融合设置" style="width: min(760px, 96vw);">
           <n-space vertical :size="14">
             <n-alert type="info" :show-icon="true">
-              预览基于当前章节规划、节拍线索与知识章末摘要推导。正式融合会写入融合任务记录。
+              这里展示的是本次融合会提交的真实输入，不再显示前端估算值。正式融合会写入融合任务记录。
             </n-alert>
             <n-descriptions :column="2" bordered size="small" label-placement="left">
-              <n-descriptions-item label="预计字数">{{ fusionPreview.estimated_words }}</n-descriptions-item>
-              <n-descriptions-item label="预计重复率">{{ Math.round(fusionPreview.estimated_repeat_ratio * 100) }}%</n-descriptions-item>
-              <n-descriptions-item label="预计终态" :span="2">
-                {{ formatPreviewState(fusionPreview.expected_end_state) }}
+              <n-descriptions-item label="章节 ID">{{ fusionChapterId || '—' }}</n-descriptions-item>
+              <n-descriptions-item label="节拍数">{{ fusionBeatDrafts.length }}</n-descriptions-item>
+              <n-descriptions-item label="目标字数">{{ fusionRequest.target_words }}</n-descriptions-item>
+              <n-descriptions-item label="悬念预算">
+                主 {{ fusionRequest.suspense_budget.primary }} / 支 {{ fusionRequest.suspense_budget.secondary }}
               </n-descriptions-item>
-              <n-descriptions-item label="预计悬念数">{{ fusionPreview.expected_suspense_count }}</n-descriptions-item>
-              <n-descriptions-item label="预警数">{{ fusionPreview.risk_warnings.length }}</n-descriptions-item>
+              <n-descriptions-item label="终态线索" :span="2">
+                {{ fusionConstraintState }}
+              </n-descriptions-item>
             </n-descriptions>
-            <n-space v-if="fusionPreview.risk_warnings.length" vertical :size="8">
-              <n-alert v-for="(warn, index) in fusionPreview.risk_warnings" :key="index" type="warning" :show-icon="true" size="small">
+            <n-space v-if="fusionInputWarnings.length" vertical :size="8">
+              <n-alert v-for="(warn, index) in fusionInputWarnings" :key="index" type="warning" :show-icon="true" size="small">
                 {{ warn }}
               </n-alert>
             </n-space>
@@ -269,7 +277,8 @@ import type { StoryNode } from '../../api/planning'
 import { knowledgeApi } from '../../api/knowledge'
 import type { ChapterSummary } from '../../api/knowledge'
 import { bibleApi, type CharacterDTO } from '../../api/bible'
-import { chapterFusionApi, type FusionJobDTO, type FusionPreviewDTO } from '../../api/chapterFusion'
+import { chapterFusionApi, type FusionJobDTO } from '../../api/chapterFusion'
+import { beatSheetApi, type BeatSheetDTO } from '../../api/beatSheet'
 import type { AutopilotChapterAudit } from './ChapterStatusPanel.vue'
 
 const props = withDefaults(
@@ -289,6 +298,7 @@ const props = withDefaults(
 const storyNodeNotFound = ref(false)
 const chapterPlan = ref<StoryNode | null>(null)
 const knowledgeChapter = ref<ChapterSummary | null>(null)
+const beatSheet = ref<BeatSheetDTO | null>(null)
 const fusionJob = ref<FusionJobDTO | null>(null)
 const fusionLoading = ref(false)
 const fusionModalVisible = ref(false)
@@ -322,40 +332,73 @@ const beatLines = computed(() => {
   return ol.split(/\n+/).map(s => s.trim()).filter(s => s.length > 0)
 })
 
-const fusionBeatDrafts = computed(() => {
+interface FusionBeatDraftView {
+  id: string
+  title: string
+  text: string
+}
+
+function buildFusionBeatDrafts(source: BeatSheetDTO | null): FusionBeatDraftView[] {
+  if (source?.scenes?.length) {
+    return source.scenes.map(scene => {
+      const title = String(scene.title || '').trim() || `节拍 ${scene.order_index + 1}`
+      const parts = [
+        String(scene.goal || '').trim(),
+        scene.location ? `地点：${scene.location}` : '',
+        scene.tone ? `基调：${scene.tone}` : '',
+      ].filter(Boolean)
+      return {
+        id: `beat-${props.currentChapterNumber ?? 0}-${scene.order_index + 1}`,
+        title,
+        text: parts.length ? `${title}：${parts.join('｜')}` : title,
+      }
+    })
+  }
+
   const beats = beatLines.value.length > 0 ? beatLines.value : ['承接前情，推进主线', '制造转折与压力', '收束到章节终态']
   return beats.map((line, index) => ({
     id: `beat-${props.currentChapterNumber ?? 0}-${index + 1}`,
-    title: line.slice(0, 24) || `Beat ${index + 1}`,
+    title: line.slice(0, 24) || `节拍 ${index + 1}`,
     text: line,
   }))
-})
+}
 
-const fusionPreview = computed<FusionPreviewDTO>(() => {
+const fusionBeatDrafts = computed(() => buildFusionBeatDrafts(beatSheet.value))
+
+const fusionRequest = computed(() => {
   const drafts = fusionBeatDrafts.value
-  const normalized = drafts.map(item => item.text.replace(/\s+/g, '').toLowerCase())
-  const unique = new Set(normalized.filter(Boolean))
-  const duplicateCount = Math.max(0, normalized.length - unique.size)
-  const repeatRatio = normalized.length > 0 ? duplicateCount / normalized.length : 0
-  const estimatedWords = Math.max(1200, drafts.reduce((sum, item) => sum + Math.max(180, item.text.length * 2), 0))
-  const endState = knowledgeChapter.value?.ending_state
-    ? { ending_state: knowledgeChapter.value.ending_state }
-    : { chapter_end: chapterPlan.value?.timeline_end || chapterPlan.value?.title || '章节终态' }
-  const warnings: string[] = []
-  if (repeatRatio > 0.15) warnings.push('重复功能偏高，建议先回到节拍层去重')
-  if (!beatLines.value.length) warnings.push('未检出明确节拍文本，融合预览基于章节摘要推导')
   return {
-    estimated_words: estimatedWords,
-    estimated_repeat_ratio: Number(repeatRatio.toFixed(2)),
-    expected_end_state: endState,
-    expected_suspense_count: Math.max(1, Math.min(5, drafts.length + 1)),
-    risk_warnings: warnings,
+    beat_ids: drafts.map(item => item.id),
+    target_words: Math.max(1800, drafts.length * 900),
+    suspense_budget: {
+      primary: 1,
+      secondary: Math.max(1, Math.min(3, drafts.length - 1)),
+    },
   }
 })
 
 const fusionDraft = computed(() => fusionJob.value?.fusion_draft ?? null)
 const fusionState = computed(() => fusionJob.value?.status ?? 'idle')
-const fusionWarningLines = computed(() => fusionDraft.value?.warnings?.length ? fusionDraft.value.warnings : fusionPreview.value.risk_warnings)
+const fusionConstraintState = computed(() => {
+  if (knowledgeChapter.value?.ending_state?.trim()) return knowledgeChapter.value.ending_state.trim()
+  if (chapterPlan.value?.timeline_end?.trim()) return chapterPlan.value.timeline_end.trim()
+  if (chapterPlan.value?.title?.trim()) return chapterPlan.value.title.trim()
+  return '未提供'
+})
+const fusionInputWarnings = computed(() => {
+  const warnings: string[] = []
+  if (!beatSheet.value?.scenes?.length) warnings.push('当前尚未落库真实节拍表，提交前会先尝试自动生成。')
+  if (!beatLines.value.length) warnings.push('未检出明确节拍文本，本次融合将主要依赖章节大纲与生成后的节拍表。')
+  return warnings
+})
+const fusionWarningLines = computed(() => fusionDraft.value?.warnings?.length ? fusionDraft.value.warnings : fusionInputWarnings.value)
+const fusionChapterId = computed(() => {
+  if (chapterPlan.value?.id) return chapterPlan.value.id
+  if (props.slug && props.currentChapterNumber) {
+    return `chapter-${props.slug}-chapter-${props.currentChapterNumber}`
+  }
+  return null
+})
 
 const fusionStorageKey = computed(() => `plotpilot:fusion-job:${props.slug}:${props.currentChapterNumber ?? 'none'}`)
 
@@ -413,20 +456,71 @@ async function loadLatestFusionJob() {
   await loadFusionJob(jobId)
 }
 
+function getBeatSheetOutline(): string {
+  const outline = chapterPlan.value?.outline?.trim()
+  if (outline) return outline
+  const fallback = beatLines.value.join('\n').trim()
+  if (fallback) return fallback
+  return ''
+}
+
+async function loadBeatSheet() {
+  beatSheet.value = null
+  const chapterId = fusionChapterId.value
+  if (!chapterId) return
+  try {
+    const sheet = await beatSheetApi.getBeatSheet(chapterId)
+    if (sheet?.scenes?.length) {
+      beatSheet.value = sheet
+      return
+    }
+  } catch {
+    // 继续尝试生成兜底
+  }
+
+  const outline = getBeatSheetOutline()
+  if (!outline) return
+
+  try {
+    const generated = await beatSheetApi.generateBeatSheet({
+      chapter_id: chapterId,
+      outline,
+    })
+    if (generated?.scenes?.length) {
+      beatSheet.value = generated
+    }
+  } catch {
+    beatSheet.value = null
+  }
+}
+
+async function ensureBeatSheet(): Promise<BeatSheetDTO | null> {
+  const chapterId = fusionChapterId.value
+  if (!chapterId) return null
+  if (beatSheet.value?.chapter_id === chapterId && beatSheet.value.scenes.length > 0) {
+    return beatSheet.value
+  }
+  await loadBeatSheet()
+  if (beatSheet.value?.chapter_id === chapterId && beatSheet.value.scenes.length > 0) {
+    return beatSheet.value
+  }
+  throw new Error('当前章节缺少可用于生成节拍表的大纲')
+}
+
 async function createFusionJob() {
   const chapterNumber = props.currentChapterNumber
-  if (!props.slug || !chapterNumber || fusionLoading.value) return
+  const chapterId = fusionChapterId.value
+  if (!props.slug || !chapterNumber || !chapterId) return
   fusionLoading.value = true
   try {
+    const ensuredBeatSheet = await ensureBeatSheet()
     const planVersion = Number((chapterPlan.value?.metadata as Record<string, unknown> | undefined)?.version ?? 1)
     const stateLockVersion = Number((chapterPlan.value?.metadata as Record<string, unknown> | undefined)?.state_lock_version ?? 1)
-    const targetWords = Math.max(1800, fusionBeatDrafts.value.length * 900)
-    const beatIds = fusionBeatDrafts.value.map(item => item.id)
-    const suspenseBudget = {
-      primary: 1,
-      secondary: Math.max(1, Math.min(3, fusionBeatDrafts.value.length - 1)),
-    }
-    const job = await chapterFusionApi.createFusionJob(props.slug, {
+    const drafts = buildFusionBeatDrafts(ensuredBeatSheet ?? beatSheet.value)
+    const targetWords = fusionRequest.value.target_words
+    const beatIds = drafts.map(item => item.id)
+    const suspenseBudget = fusionRequest.value.suspense_budget
+    const job = await chapterFusionApi.createFusionJob(chapterId, {
       plan_version: planVersion,
       state_lock_version: stateLockVersion,
       beat_ids: beatIds,
@@ -441,8 +535,9 @@ async function createFusionJob() {
     }, 1600)
     fusionModalVisible.value = false
     message.success('融合任务已创建')
-  } catch {
-    message.error('创建融合任务失败')
+  } catch (error) {
+    const detail = getApiErrorMessage(error) || (error instanceof Error ? error.message : '')
+    message.error(detail ? `创建融合任务失败：${detail}` : '创建融合任务失败')
   } finally {
     fusionLoading.value = false
   }
@@ -500,10 +595,18 @@ function formatTime(t: string) {
   }
 }
 
-function formatPreviewState(state: Record<string, unknown>): string {
-  const entries = Object.entries(state || {})
-  if (!entries.length) return '—'
-  return entries.map(([k, v]) => `${k}: ${String(v)}`).join(' / ')
+function getApiErrorMessage(error: unknown): string {
+  if (typeof error !== 'object' || error === null) return ''
+  const response = (error as { response?: { data?: unknown } }).response
+  const data = response?.data
+  if (typeof data === 'string') return data
+  if (typeof data === 'object' && data !== null) {
+    const detail = (data as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.trim()) return detail
+    const message = (data as { message?: unknown }).message
+    if (typeof message === 'string' && message.trim()) return message
+  }
+  return ''
 }
 
 function findChapterNode(nodes: StoryNode[], num: number): StoryNode | null {
@@ -547,6 +650,14 @@ async function loadKnowledgeChapter() {
   }
 }
 
+async function refreshChapterData() {
+  await resolveStoryNode()
+  await Promise.all([
+    loadKnowledgeChapter(),
+    loadBeatSheet(),
+  ])
+}
+
 // 加载 Bible 数据用于名称映射
 async function loadBible() {
   try {
@@ -561,32 +672,29 @@ watch(() => props.slug, async (slug) => {
   if (slug) {
     chapterPlan.value = null
     storyNodeNotFound.value = false
+    beatSheet.value = null
     await Promise.all([
       loadBible(),
-      resolveStoryNode(),
-      loadKnowledgeChapter()
+      refreshChapterData()
     ])
   }
 })
 
 watch(() => props.currentChapterNumber, async () => {
-  await resolveStoryNode()
-  await loadKnowledgeChapter()
+  await refreshChapterData()
   await loadLatestFusionJob()
 }, { immediate: false })
 
 const refreshStore = useWorkbenchRefreshStore()
 const { deskTick } = storeToRefs(refreshStore)
 watch(deskTick, async () => {
-  await resolveStoryNode()
-  await loadKnowledgeChapter()
+  await refreshChapterData()
   await loadLatestFusionJob()
 })
 
 onMounted(async () => {
   await loadBible()
-  await resolveStoryNode()
-  await loadKnowledgeChapter()
+  await refreshChapterData()
   await loadLatestFusionJob()
 })
 

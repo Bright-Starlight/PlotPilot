@@ -1,13 +1,19 @@
 """章节融合服务。"""
 from __future__ import annotations
 
-import asyncio
 import math
 import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from application.ai.structured_json_pipeline import structured_json_generate
+from application.core.chapter_fusion_contract import (
+    FusionGenerationPayload,
+    fusion_generation_response_format,
+)
+from domain.ai.services.llm_service import GenerationConfig, LLMService
+from domain.ai.value_objects.prompt import Prompt
 from domain.novel.repositories.chapter_repository import ChapterRepository
 from domain.novel.value_objects.chapter_id import ChapterId
 from infrastructure.persistence.database.sqlite_beat_sheet_repository import SqliteBeatSheetRepository
@@ -34,10 +40,12 @@ class ChapterFusionService:
         chapter_repository: ChapterRepository,
         beat_sheet_repository: SqliteBeatSheetRepository,
         fusion_repository: SqliteChapterFusionRepository,
+        llm_service: LLMService,
     ):
         self.chapter_repository = chapter_repository
         self.beat_sheet_repository = beat_sheet_repository
         self.fusion_repository = fusion_repository
+        self.llm_service = llm_service
 
     def create_job(
         self,
@@ -91,7 +99,14 @@ class ChapterFusionService:
         if not beat_drafts:
             return self._fail_job(job.fusion_job_id, job.chapter_id, "beats_missing", "BeatDrafts are missing")
 
-        result = self._compose_fusion(chapter.title, chapter.content or "", chapter.outline or "", beat_drafts, job.target_words, job.suspense_budget.__dict__)
+        result = await self._compose_fusion(
+            chapter.title,
+            chapter.content or "",
+            chapter.outline or "",
+            beat_drafts,
+            job.target_words,
+            job.suspense_budget.__dict__,
+        )
         if result["status"] == "failed":
             self.fusion_repository.add_log(fusion_job_id, job.chapter_id, "compose", "failed", result["message"])
             self.fusion_repository.update_job_status(fusion_job_id, "failed", result["message"])
@@ -140,6 +155,7 @@ class ChapterFusionService:
         beats: List[BeatDraft] = []
         for index, beat_id in enumerate(beat_ids):
             scene = beat_sheet.scenes[index]
+            end_state = {"location": scene.location} if index == len(beat_ids) - 1 and scene.location else None
             beats.append(
                 BeatDraft(
                     beat_id=beat_id,
@@ -147,12 +163,12 @@ class ChapterFusionService:
                     function=scene.goal,
                     event=f"{scene.title}：{scene.goal}",
                     location=scene.location or "",
-                    end_state={"location": scene.location} if scene.location else None,
+                    end_state=end_state,
                 )
             )
         return beats
 
-    def _compose_fusion(
+    async def _compose_fusion(
         self,
         chapter_title: str,
         chapter_content: str,
@@ -188,34 +204,58 @@ class ChapterFusionService:
             }
         end_state = end_states[-1] if end_states else {}
 
-        paragraphs: List[str] = []
-        if chapter_title.strip():
-            paragraphs.append(f"{chapter_title}。")
-        if chapter_outline.strip():
-            paragraphs.append(chapter_outline.strip())
-        if chapter_content.strip():
-            paragraphs.append(chapter_content.strip())
+        required_facts = [beat.event for beat in unique_beats]
+        prompt = self._build_fusion_prompt(
+            chapter_title=chapter_title,
+            chapter_content=chapter_content,
+            chapter_outline=chapter_outline,
+            beat_drafts=unique_beats,
+            required_facts=required_facts,
+            expected_end_state=end_state,
+            suspense_budget=suspense_budget,
+            target_words=target_words,
+        )
+        payload = await structured_json_generate(
+            llm=self.llm_service,
+            prompt=prompt,
+            config=GenerationConfig(
+                max_tokens=4096,
+                temperature=0.6,
+                response_format=fusion_generation_response_format(),
+            ),
+            schema_model=FusionGenerationPayload,
+        )
+        if payload is None:
+            return {
+                "status": "failed",
+                "message": "Fusion generation failed",
+            }
 
-        last_location = ""
-        facts_confirmed: List[str] = []
-        open_questions: List[str] = []
-        for beat in unique_beats:
-            if beat.location and last_location and beat.location != last_location:
-                paragraphs.append(f"随后，叙述自然过渡到{beat.location}。")
-            if beat.location:
-                last_location = beat.location
-            paragraph = f"{beat.title}：{beat.event}"
-            paragraphs.append(paragraph)
-            facts_confirmed.append(beat.event)
-            if beat.end_state:
-                facts_confirmed.append("终态收束")
+        text = payload.text.strip()
+        if not text:
+            return {
+                "status": "failed",
+                "message": "Fusion draft is empty",
+            }
 
-        text = "\n\n".join(paragraphs).strip()
+        warnings.extend(payload.model_warnings)
+        facts_confirmed = self._resolve_confirmed_facts(required_facts, payload.facts_used)
+        missing_facts = [fact for fact in required_facts if fact not in facts_confirmed]
+        if missing_facts:
+            preview = "；".join(missing_facts[:3])
+            warnings.append(f"融合稿缺失 {len(missing_facts)} 条关键事实：{preview}")
+
+        open_questions: List[str] = list(dict.fromkeys(payload.open_questions))
+        if end_state and payload.end_state and self._normalize_state(payload.end_state) != self._normalize_state(end_state):
+            return {
+                "status": "failed",
+                "message": "Output end state conflicts with beat constraints",
+            }
+        end_state = payload.end_state or end_state
         repeat_ratio = (duplicate_count / max(len(beat_drafts), 1))
         estimated_words = self._estimate_words(text)
         if target_words > 0 and estimated_words > target_words:
-            cut = max(target_words, 1)
-            text = text[:cut].rstrip()
+            text = self._trim_to_target_words(text, target_words)
             warnings.append("已按目标字数裁剪融合草稿")
         if repeat_ratio > 0.15:
             warnings.append("重复率偏高，建议回到 Beat 层继续去重")
@@ -223,6 +263,8 @@ class ChapterFusionService:
         suspense_total = int(suspense_budget.get("primary") or 0) + int(suspense_budget.get("secondary") or 0)
         if suspense_total <= 0:
             open_questions.append("需要补足悬念预算")
+        elif payload.suspense_used < suspense_total:
+            warnings.append(f"悬念预算未完全覆盖，目标 {suspense_total}，实际 {payload.suspense_used}")
 
         return {
             "status": "warning" if warnings else "completed",
@@ -233,6 +275,85 @@ class ChapterFusionService:
             "end_state": end_state,
             "warnings": warnings,
         }
+
+    def _build_fusion_prompt(
+        self,
+        chapter_title: str,
+        chapter_content: str,
+        chapter_outline: str,
+        beat_drafts: List[BeatDraft],
+        required_facts: List[str],
+        expected_end_state: Dict[str, Any],
+        suspense_budget: Dict[str, Any],
+        target_words: int,
+    ) -> Prompt:
+        beat_lines = []
+        for index, beat in enumerate(beat_drafts, start=1):
+            beat_lines.append(
+                (
+                    f"{index}. 标题：{beat.title}\n"
+                    f"   作用：{beat.function}\n"
+                    f"   事件：{beat.event}\n"
+                    f"   地点：{beat.location or '未指定'}\n"
+                    f"   终态：{beat.end_state or {}}"
+                )
+            )
+        fact_lines = "\n".join(f"- {fact}" for fact in required_facts) or "- 无"
+        system_prompt = (
+            "你是长篇小说章节融合编辑。"
+            "你的任务是把节拍草稿融合成自然、连贯、可继续润色的章节正文。"
+            "不要输出条目式标题，不要写“节拍一/节拍二”，正文必须是小说自然段。"
+            "必须覆盖全部关键事实，保持人物关系与终态约束，不要编造输入里没有的新设定。"
+            "只输出符合 JSON schema 的对象。"
+        )
+        user_prompt = (
+            "任务代号：fusion_generation_v1\n\n"
+            f"章节标题：{chapter_title or '未命名章节'}\n"
+            f"目标字数：{target_words}\n"
+            f"悬念预算：主悬念 {int(suspense_budget.get('primary') or 0)}，支悬念 {int(suspense_budget.get('secondary') or 0)}\n"
+            f"预期终态：{expected_end_state or {}}\n\n"
+            f"章节大纲：\n{chapter_outline or '无'}\n\n"
+            f"现有正文（可吸收但不要原样拼贴）：\n{chapter_content or '无'}\n\n"
+            f"节拍草稿：\n{'\n\n'.join(beat_lines)}\n\n"
+            f"必保留事实：\n{fact_lines}\n\n"
+            "输出要求：\n"
+            "1. text 必须是自然正文，避免“标题：内容”的模板痕迹。\n"
+            "2. facts_used 必须逐条列出已覆盖的关键事实，文本内容需与输入事实一致。\n"
+            "3. end_state 只填写正文最终收束状态；若输入没有终态可返回空对象。\n"
+            "4. suspense_used 填写正文实际保留的悬念数量。\n"
+            "5. open_questions 仅列出正文仍未解决的问题。\n"
+            "6. model_warnings 仅列出你无法完全满足的约束。"
+        )
+        return Prompt(system=system_prompt, user=user_prompt)
+
+    @staticmethod
+    def _normalize_state(state: Dict[str, Any]) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted((key, str(value)) for key, value in (state or {}).items()))
+
+    @staticmethod
+    def _resolve_confirmed_facts(required_facts: List[str], facts_used: List[str]) -> List[str]:
+        used_map = {_norm_text(fact): fact for fact in facts_used if fact}
+        confirmed: List[str] = []
+        for fact in required_facts:
+            if _norm_text(fact) in used_map:
+                confirmed.append(fact)
+        return list(dict.fromkeys(confirmed))
+
+    def _trim_to_target_words(self, text: str, target_words: int) -> str:
+        if target_words <= 0 or self._estimate_words(text) <= target_words:
+            return text
+
+        sentences = [segment.strip() for segment in re.split(r"(?<=[。！？!?])", text) if segment.strip()]
+        kept: List[str] = []
+        for sentence in sentences:
+            candidate = "".join(kept + [sentence]).strip()
+            if kept and self._estimate_words(candidate) > target_words:
+                break
+            kept.append(sentence)
+        trimmed = "".join(kept).strip() or text.strip()
+        while len(trimmed) > 1 and self._estimate_words(trimmed) > target_words:
+            trimmed = trimmed[:-1].rstrip()
+        return trimmed
 
     @staticmethod
     def _estimate_words(text: str) -> int:

@@ -1,14 +1,18 @@
 """ChapterFusionService 单元测试。"""
 from __future__ import annotations
 
+import json
 import pytest
 from unittest.mock import Mock
 
 from application.core.dtos.chapter_fusion_dto import FusionDraftDTO, FusionJobDTO, FusionSuspenseBudgetDTO
+from domain.ai.services.llm_service import GenerationConfig, GenerationResult, LLMService
+from domain.ai.value_objects.prompt import Prompt
 from application.core.services.chapter_fusion_service import BeatDraft, ChapterFusionService
 from domain.novel.entities.chapter import Chapter
 from domain.novel.value_objects.scene import Scene
 from domain.novel.value_objects.novel_id import NovelId
+from domain.ai.value_objects.token_usage import TokenUsage
 
 
 class _FakeChapterRepository:
@@ -25,6 +29,27 @@ class _FakeBeatSheetRepository:
 
     async def get_by_chapter_id(self, chapter_id):  # noqa: ANN001
         return type("BeatSheet", (), {"scenes": self.scenes})()
+
+
+class _FakeLLMService(LLMService):
+    def __init__(self, payload: dict | None = None):
+        self.payload = payload or {
+            "text": "沈惊鸿压低呼吸，先在客栈中典当玉佩稳住局面，随后连夜赶往钱府继续追索线索。",
+            "facts_used": ["典当玉佩回忆", "前往钱府"],
+            "end_state": {},
+            "suspense_used": 2,
+            "open_questions": [],
+            "model_warnings": [],
+        }
+
+    async def generate(self, prompt: Prompt, config: GenerationConfig) -> GenerationResult:
+        return GenerationResult(
+            content=json.dumps(self.payload, ensure_ascii=False),
+            token_usage=TokenUsage(input_tokens=len(prompt.user), output_tokens=128),
+        )
+
+    async def stream_generate(self, prompt: Prompt, config: GenerationConfig):
+        yield json.dumps(self.payload, ensure_ascii=False)
 
 
 class TestChapterFusionService:
@@ -54,6 +79,7 @@ class TestChapterFusionService:
             chapter_repository=_FakeChapterRepository(chapter),
             beat_sheet_repository=_FakeBeatSheetRepository(scenes),
             fusion_repository=fusion_repo,
+            llm_service=_FakeLLMService(),
         )
 
     def test_create_job_blocks_when_state_lock_missing(self, service):
@@ -67,8 +93,9 @@ class TestChapterFusionService:
                 suspense_budget={"primary": 1, "secondary": 1},
             )
 
-    def test_compose_fusion_deduplicates_and_bridges_transitions(self, service):
-        result = service._compose_fusion(
+    @pytest.mark.asyncio
+    async def test_compose_fusion_uses_ai_output_and_deduplicates(self, service):
+        result = await service._compose_fusion(
             "第一章",
             "旧正文",
             "旧大纲",
@@ -83,11 +110,22 @@ class TestChapterFusionService:
 
         assert result["status"] in {"completed", "warning"}
         assert result["repeat_ratio"] > 0
-        assert "随后，叙述自然过渡到钱府" in result["text"]
+        assert "沈惊鸿" in result["text"]
         assert len(result["facts_confirmed"]) == 2
 
-    def test_compose_fusion_deduplicates_same_event_across_functions(self, service):
-        result = service._compose_fusion(
+    @pytest.mark.asyncio
+    async def test_compose_fusion_deduplicates_same_event_across_functions(self, service):
+        service.llm_service = _FakeLLMService(
+            {
+                "text": "沈惊鸿在客栈里反复思量同一件事，最终只保留了一次有效推进。",
+                "facts_used": ["同一事件"],
+                "end_state": {},
+                "suspense_used": 1,
+                "open_questions": [],
+                "model_warnings": [],
+            }
+        )
+        result = await service._compose_fusion(
             "第一章",
             "",
             "",
@@ -103,8 +141,29 @@ class TestChapterFusionService:
         assert len(result["facts_confirmed"]) == 1
         assert "重复率偏高" in " ".join(result["warnings"])
 
-    def test_compose_fusion_marks_warning_when_any_warning_exists(self, service):
-        result = service._compose_fusion(
+    @pytest.mark.asyncio
+    async def test_load_beat_drafts_assigns_end_state_only_to_final_beat(self, chapter):
+        fusion_repo = Mock()
+        service = ChapterFusionService(
+            chapter_repository=_FakeChapterRepository(chapter),
+            beat_sheet_repository=_FakeBeatSheetRepository(
+                [
+                    Scene(title="开场", goal="典当玉佩", pov_character="沈惊鸿", location="客栈", tone="紧张", estimated_words=500, order_index=0),
+                    Scene(title="转折", goal="前往钱府", pov_character="沈惊鸿", location="钱府", tone="深夜", estimated_words=600, order_index=1),
+                ]
+            ),
+            fusion_repository=fusion_repo,
+            llm_service=_FakeLLMService(),
+        )
+
+        beats = await service._load_beat_drafts("ch-1", ["b1", "b2"])
+
+        assert beats[0].end_state is None
+        assert beats[1].end_state == {"location": "钱府"}
+
+    @pytest.mark.asyncio
+    async def test_compose_fusion_marks_warning_when_any_warning_exists(self, service):
+        result = await service._compose_fusion(
             "第一章",
             "旧正文",
             "旧大纲",
@@ -131,13 +190,15 @@ class TestChapterFusionService:
                 ]
             ),
             fusion_repository=fusion_repo,
+            llm_service=_FakeLLMService(),
         )
 
         with pytest.raises(ValueError, match="stored beat sheet"):
             await service._load_beat_drafts("ch-1", ["b1"])
 
-    def test_compose_fusion_fails_for_conflicting_end_states(self, service):
-        result = service._compose_fusion(
+    @pytest.mark.asyncio
+    async def test_compose_fusion_fails_for_conflicting_end_states(self, service):
+        result = await service._compose_fusion(
             "第一章",
             "",
             "",
@@ -151,6 +212,37 @@ class TestChapterFusionService:
 
         assert result["status"] == "failed"
         assert "not unique" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_compose_fusion_fails_when_ai_end_state_conflicts(self, chapter, scenes):
+        fusion_repo = Mock()
+        service = ChapterFusionService(
+            chapter_repository=_FakeChapterRepository(chapter),
+            beat_sheet_repository=_FakeBeatSheetRepository(scenes),
+            fusion_repository=fusion_repo,
+            llm_service=_FakeLLMService(
+                {
+                    "text": "沈惊鸿在钱府落脚，却突然被写成留在客栈。",
+                    "facts_used": ["前往钱府"],
+                    "end_state": {"location": "客栈"},
+                    "suspense_used": 1,
+                    "open_questions": [],
+                    "model_warnings": [],
+                }
+            ),
+        )
+
+        result = await service._compose_fusion(
+            "第一章",
+            "",
+            "",
+            [BeatDraft("b1", "收束", "前往钱府", "前往钱府", end_state={"location": "钱府"})],
+            target_words=1200,
+            suspense_budget={"primary": 1, "secondary": 0},
+        )
+
+        assert result["status"] == "failed"
+        assert "conflicts" in result["message"]
 
 
 class TestFusionJobPreview:

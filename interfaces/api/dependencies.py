@@ -238,6 +238,7 @@ def get_chapter_fusion_service() -> ChapterFusionService:
         chapter_repository=get_chapter_repository(),
         beat_sheet_repository=SqliteBeatSheetRepository(get_database()),
         fusion_repository=SqliteChapterFusionRepository(get_database()),
+        llm_service=get_llm_service(),
     )
 
 

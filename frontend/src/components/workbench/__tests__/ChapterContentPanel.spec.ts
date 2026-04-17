@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   planningGetStructure: vi.fn(),
   knowledgeGetKnowledge: vi.fn(),
   bibleGetBible: vi.fn(),
+  getBeatSheet: vi.fn(),
+  generateBeatSheet: vi.fn(),
   createFusionJob: vi.fn(),
   getFusionJob: vi.fn(),
 }))
@@ -56,6 +58,14 @@ vi.mock('@/api/bible', () => ({
   },
 }))
 
+vi.mock('@/api/beatSheet', () => ({
+  beatSheetApi: {
+    getBeatSheet: mocks.getBeatSheet,
+    generateBeatSheet: mocks.generateBeatSheet,
+    deleteBeatSheet: vi.fn(),
+  },
+}))
+
 vi.mock('@/api/chapterFusion', () => ({
   chapterFusionApi: {
     createFusionJob: mocks.createFusionJob,
@@ -84,6 +94,42 @@ const baseStructure = {
       },
     ],
   },
+}
+
+const baseBeatSheet = {
+  id: 'beat-sheet-1',
+  chapter_id: 'chapter-1',
+  scenes: [
+    {
+      title: '重复句',
+      goal: '重复句',
+      pov_character: '主角',
+      location: '庭院',
+      tone: '紧张',
+      estimated_words: 800,
+      order_index: 0,
+    },
+    {
+      title: '重复句',
+      goal: '重复句',
+      pov_character: '主角',
+      location: '庭院',
+      tone: '紧张',
+      estimated_words: 800,
+      order_index: 1,
+    },
+    {
+      title: '收束',
+      goal: '收束',
+      pov_character: '主角',
+      location: '内室',
+      tone: '平静',
+      estimated_words: 700,
+      order_index: 2,
+    },
+  ],
+  total_scenes: 3,
+  total_estimated_words: 2300,
 }
 
 const baseKnowledge = {
@@ -142,6 +188,8 @@ beforeEach(() => {
   mocks.planningGetStructure.mockResolvedValue(baseStructure)
   mocks.knowledgeGetKnowledge.mockResolvedValue(baseKnowledge)
   mocks.bibleGetBible.mockResolvedValue(baseBible)
+  mocks.getBeatSheet.mockResolvedValue(baseBeatSheet)
+  mocks.generateBeatSheet.mockResolvedValue(baseBeatSheet)
   mocks.createFusionJob.mockResolvedValue({
     fusion_job_id: 'job-1',
     chapter_id: 'chapter-1',
@@ -181,20 +229,63 @@ afterAll(() => {
 })
 
 describe('ChapterContentPanel', () => {
-  it('shows fusion preview and workspace tabs', async () => {
+  it('shows fusion confirmation inputs and workspace tabs', async () => {
     const panel = mountPanel()
     await flushPromises()
 
     expect(panel.findAll('n-tab-pane')).toHaveLength(5)
     expect(panel.text()).toContain('来自章节大纲，用于叙事摘要和向量检索')
     expect(panel.text()).toContain('左侧是节拍草稿摘要，右侧是当前融合草稿。此处用来查看融合是否过度压缩或丢失桥接。')
-    expect(panel.text()).toContain('重复功能偏高，建议先回到节拍层去重')
+    expect(panel.text()).toContain('这里展示的是本次融合会提交的真实输入，不再显示前端估算值。正式融合会写入融合任务记录。')
+    expect(panel.text()).toContain('chapter-1')
+    expect(panel.text()).toContain('2700')
+    expect(panel.text()).toContain('主 1 / 支 2')
+    expect(panel.text()).toContain('门已开启')
 
-    await panel.get('n-button').trigger('click')
+    await (panel.vm as unknown as { createFusionJob: () => Promise<void> }).createFusionJob()
+    await flushPromises()
+
+    expect(mocks.createFusionJob).toHaveBeenCalledWith('chapter-1', expect.any(Object))
+    expect(mocks.getBeatSheet).toHaveBeenCalledWith('chapter-1')
+    expect(panel.text()).toContain('queued')
+    expect(panel.text()).toContain('任务 job-1')
+
+    panel.unmount()
+  })
+
+  it('generates beat sheet before fusion when missing', async () => {
+    mocks.getBeatSheet.mockRejectedValue({
+      response: {
+        status: 404,
+        data: { detail: 'Beat sheet not found' },
+      },
+    })
+    const generatedBeatSheet = {
+      ...baseBeatSheet,
+      id: 'beat-sheet-generated',
+    }
+    mocks.generateBeatSheet.mockResolvedValueOnce(generatedBeatSheet)
+
+    const panel = mountPanel()
+    await flushPromises()
     await nextTick()
+    await flushPromises()
+    await new Promise(resolve => setTimeout(resolve, 0))
 
-    expect(panel.text()).toContain('ending_state: 门已开启')
-    expect(panel.text()).toContain('重复功能偏高，建议先回到节拍层去重')
+    expect(mocks.generateBeatSheet).toHaveBeenCalledWith({
+      chapter_id: 'chapter-1',
+      outline: '重复句\n重复句\n收束',
+    })
+
+    await (panel.vm as unknown as { createFusionJob: () => Promise<void> }).createFusionJob()
+    await flushPromises()
+
+    expect(mocks.createFusionJob).toHaveBeenCalledWith(
+      'chapter-1',
+      expect.objectContaining({
+        beat_ids: ['beat-1-1', 'beat-1-2', 'beat-1-3'],
+      })
+    )
 
     panel.unmount()
   })
