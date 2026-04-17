@@ -26,7 +26,6 @@
                   :slug="slug"
                   :book-title="bookTitle"
                   :chapters="chapters"
-                  :target-words-per-chapter="targetWordsPerChapter"
                   :current-chapter-id="currentChapterId"
                   :chapter-content="chapterContent"
                   :chapter-loading="chapterLoading"
@@ -68,7 +67,7 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, onMounted, computed, ref, watch, type ComponentPublicInstance } from 'vue'
+import { onMounted, computed, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useRoute } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useWorkbench } from '../composables/useWorkbench'
@@ -130,7 +129,6 @@ const {
   currentChapterId,
   chapterContent,
   chapterLoading,
-  targetWordsPerChapter,
   setRightPanel,
   loadDesk,
   goHome,

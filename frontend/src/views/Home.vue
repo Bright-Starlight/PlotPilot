@@ -365,15 +365,13 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, h, ref, onMounted, computed, nextTick } from 'vue'
+import { h, ref, onMounted, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage, NIcon } from 'naive-ui'
 import { novelApi, type NovelDTO } from '../api/novel'
 import StatsSidebar from '@/components/stats/StatsSidebar.vue'
 import NovelSetupGuide from '@/components/onboarding/NovelSetupGuide.vue'
 import { useStatsStore } from '@/stores/statsStore'
-
-const LLMSettingsModal = defineAsyncComponent(() => import('@/components/LLMSettingsModal.vue'))
 
 // Icons
 const IconSpark = () =>
@@ -438,17 +436,16 @@ const newBook = ref({
 })
 
 const genreOptions = [
-  { label: '玄幻', value: 'xuanhuan' },
-  { label: '都市', value: 'dushi' },
-  { label: '科幻', value: 'scifi' },
-  { label: '历史', value: 'history' },
-  { label: '武侠', value: 'wuxia' },
-  { label: '仙侠', value: 'xianxia' },
-  { label: '奇幻', value: 'fantasy' },
-  { label: '游戏', value: 'game' },
-  { label: '悬疑', value: 'suspense' },
-  { label: '言情', value: 'romance' },
-  { label: '其他', value: 'other' },
+  { label: '玄幻', value: '玄幻' },
+  { label: '都市', value: '都市' },
+  { label: '科幻', value: '科幻' },
+  { label: '历史', value: '历史' },
+  { label: '武侠', value: '武侠' },
+  { label: '仙侠', value: '仙侠' },
+  { label: '奇幻', value: '奇幻' },
+  { label: '游戏', value: '游戏' },
+  { label: '悬疑', value: '悬疑' },
+  { label: '其他', value: '其他' },
 ]
 
 const filteredBooks = computed(() => {
@@ -506,7 +503,7 @@ const fetchBooks = async () => {
       title: novel.title,
       stage: novel.stage,
       stage_label: getStageLabel(novel.stage),
-      genre: novel.genre || '',
+      genre: '',
       chapter_count: novel.chapters?.length || 0,
       word_count: novel.total_word_count,
     }))
@@ -551,9 +548,7 @@ const handleCreate = async () => {
       title: title,
       author: '作者',
       target_chapters: targetChapters,
-      target_words_per_chapter: newBook.value.words || 2500,
       premise: newBook.value.premise,
-      genre: newBook.value.genre || '',
     }
 
     const result = await novelApi.createNovel(payload)

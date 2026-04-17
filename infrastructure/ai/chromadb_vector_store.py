@@ -12,6 +12,7 @@
 """
 from typing import List
 import json
+import os
 from pathlib import Path
 
 from domain.ai.services.vector_store import VectorStore
@@ -120,15 +121,17 @@ class ChromaDBVectorStore(VectorStore):
             if id in coll["metadata"]:
                 await self.delete(collection, id)
 
+            # 添加到 FAISS 索引
+            coll["index"].add(vec_array)
+            idx = coll["index"].ntotal - 1
+
+            # 保存元数据
             coll["metadata"][id] = {
-                "vector": list(vector),
+                "idx": idx,
                 "payload": payload
             }
 
-            if self._use_faiss:
-                coll["index"].add(vec_array)
-                coll["metadata"][id]["idx"] = coll["index"].ntotal - 1
-                self._save_collection(collection)
+            self._save_collection(collection)
         except Exception as e:
             raise Exception(f"Failed to insert vector: {str(e)}")
 
@@ -146,24 +149,32 @@ class ChromaDBVectorStore(VectorStore):
                 raise Exception(f"Collection {collection} does not exist")
 
             coll = self.collections[collection]
-            if not coll["metadata"]:
+            if coll["index"].ntotal == 0:
                 return []
 
-            query_array = np.array(query_vector, dtype=np.float32)
-            output = []
-            for vec_id, meta in coll["metadata"].items():
-                vector = np.array(meta["vector"], dtype=np.float32)
-                dist = float(np.sum((vector - query_array) ** 2))
-                output.append(
-                    {
-                        "id": vec_id,
-                        "score": 1.0 / (1.0 + dist),
-                        "payload": meta["payload"],
-                    }
-                )
+            query_array = np.array([query_vector], dtype=np.float32)
+            distances, indices = coll["index"].search(query_array, min(limit, coll["index"].ntotal))
 
-            output.sort(key=lambda item: item["score"], reverse=True)
-            return output[:limit]
+            # 构建 ID 到索引的反向映射
+            idx_to_id = {v["idx"]: k for k, v in coll["metadata"].items()}
+
+            # 转换为统一格式
+            output = []
+            for i, (dist, idx) in enumerate(zip(distances[0], indices[0])):
+                if idx == -1:  # FAISS 返回 -1 表示无效结果
+                    continue
+
+                vec_id = idx_to_id.get(int(idx))
+                if vec_id:
+                    # 将 L2 距离转换为相似度分数 (0-1)
+                    score = 1.0 / (1.0 + float(dist))
+                    output.append({
+                        "id": vec_id,
+                        "score": score,
+                        "payload": coll["metadata"][vec_id]["payload"]
+                    })
+
+            return output
         except Exception as e:
             raise Exception(f"Failed to search vectors: {str(e)}")
 
@@ -203,16 +214,13 @@ class ChromaDBVectorStore(VectorStore):
                 )
                 await self.delete_collection(collection)
 
+            # 创建 FAISS 索引（使用 L2 距离）
+            index = faiss.IndexFlatL2(dimension)
             self.collections[collection] = {
-                "index": None,
-                "dimension": dimension,
+                "index": index,
                 "metadata": {}
             }
-            if self._use_faiss:
-                import faiss
-
-                self.collections[collection]["index"] = faiss.IndexFlatL2(dimension)
-                self._save_collection(collection)
+            self._save_collection(collection)
         except Exception as e:
             raise Exception(f"Failed to create collection: {repr(e)}")
 

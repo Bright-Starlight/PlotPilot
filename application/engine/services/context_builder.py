@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from application.world.services.bible_service import BibleService
 from domain.bible.services.relationship_engine import RelationshipEngine
 from domain.novel.services.storyline_manager import StorylineManager
-from domain.novel.value_objects.novel_id import NovelId
 from domain.novel.repositories.novel_repository import NovelRepository
 from domain.novel.repositories.chapter_repository import ChapterRepository
 from domain.novel.repositories.plot_arc_repository import PlotArcRepository
@@ -22,7 +21,6 @@ from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepo
 from domain.ai.services.vector_store import VectorStore
 from domain.ai.services.embedding_service import EmbeddingService
 from application.engine.services.context_budget_allocator import ContextBudgetAllocator
-from application.config import AppConfig
 
 if TYPE_CHECKING:
     from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
@@ -91,8 +89,6 @@ class ContextBuilder:
             triple_repository=triple_repository,
             vector_store=vector_store,
             embedding_service=embedding_service,
-            theme_agent=theme_agent,
-            knowledge_repository=knowledge_repository,
         )
 
     def build_voice_anchor_system_section(self, novel_id: str) -> str:
@@ -104,7 +100,7 @@ class ContextBuilder:
         novel_id: str,
         chapter_number: int,
         outline: str,
-        max_tokens: int = AppConfig.CONTEXT_MAX_TOKENS,
+        max_tokens: int = 35000,
         scene_director: Optional[Dict[str, Any]] = None,
     ) -> str:
         """构建上下文（使用预算分配器）
@@ -126,24 +122,15 @@ class ContextBuilder:
             total_budget=max_tokens,
             scene_director=scene_director,
         )
-
-        final_context = allocation.get_final_context()
-        if final_context.strip():
-            return final_context
-        return self._build_legacy_context(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            outline=outline,
-            max_tokens=max_tokens,
-            scene_director=scene_director,
-        )
+        
+        return allocation.get_final_context()
 
     def build_structured_context(
         self,
         novel_id: str,
         chapter_number: int,
         outline: str,
-        max_tokens: int = AppConfig.CONTEXT_MAX_TOKENS,
+        max_tokens: int = 35000,
         scene_director: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """构建结构化上下文，返回详细信息
@@ -192,7 +179,7 @@ class ContextBuilder:
                 layer3_parts.append(f"=== {slot.name.upper()} ===\n{slot.content}")
                 layer3_tokens += slot.tokens
         
-        result = {
+        return {
             "layer1_text": "\n\n".join(layer1_parts),
             "layer2_text": "\n\n".join(layer2_parts),
             "layer3_text": "\n\n".join(layer3_parts),
@@ -203,84 +190,6 @@ class ContextBuilder:
                 "total": allocation.used_tokens,
             },
         }
-        if any(result[key].strip() for key in ("layer1_text", "layer2_text", "layer3_text")):
-            return result
-        return self._build_legacy_structured_context(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            outline=outline,
-            max_tokens=max_tokens,
-            scene_director=scene_director,
-        )
-
-    def _build_legacy_context(
-        self,
-        novel_id: str,
-        chapter_number: int,
-        outline: str,
-        max_tokens: int,
-        scene_director: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        structured = self._build_legacy_structured_context(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            outline=outline,
-            max_tokens=max_tokens,
-            scene_director=scene_director,
-        )
-        return "\n\n".join(
-            part for part in (
-                structured["layer1_text"],
-                structured["layer2_text"],
-                structured["layer3_text"],
-            )
-            if part.strip()
-        )
-
-    def _build_legacy_structured_context(
-        self,
-        novel_id: str,
-        chapter_number: int,
-        outline: str,
-        max_tokens: int,
-        scene_director: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        layer1 = self._build_layer1_legacy(novel_id, chapter_number, outline)
-        layer2 = self._build_layer2_smart_retrieval(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            outline=outline,
-            budget=max_tokens,
-            scene_director=scene_director,
-        )
-        total = len(layer1) + len(layer2)
-        return {
-            "layer1_text": layer1,
-            "layer2_text": layer2,
-            "layer3_text": "",
-            "token_usage": {
-                "layer1": len(layer1),
-                "layer2": len(layer2),
-                "layer3": 0,
-                "total": total,
-            },
-        }
-
-    def _build_layer1_legacy(self, novel_id: str, chapter_number: int, outline: str) -> str:
-        parts: List[str] = []
-        novel = self.novel_repository.get_by_id(novel_id)
-        if novel:
-            parts.append(
-                f"=== NOVEL ===\nTitle: {getattr(novel, 'title', '')}\nAuthor: {getattr(novel, 'author', '')}\nChapter {chapter_number}\nOutline: {outline}"
-            )
-
-        if getattr(self.storyline_manager, "repository", None):
-            storylines = self.storyline_manager.repository.get_by_novel_id(NovelId(novel_id)) or []
-            if storylines:
-                lines = ["=== ACTIVE STORYLINES ===", "Active Storylines:"]
-                for storyline in storylines:
-                    lines.append(f"- {getattr(getattr(storyline, 'storyline_type', None), 'value', '')}")
-                parts.append("\n".join(lines))
 
         if self.plot_arc_repository:
             arc = self.plot_arc_repository.get_by_novel_id(NovelId(novel_id))
@@ -400,12 +309,11 @@ class ContextBuilder:
 
     def magnify_outline_to_beats(self, chapter_number: int, outline: str, target_chapter_words: int = AppConfig.DEFAULT_WORDS_PER_CHAPTER) -> List[Beat]:
         """节拍放大器：将章节大纲拆分为微观节拍
-
+        
         核心策略：
         1. 识别大纲中的关键动作/事件
         2. 为每个动作分配节拍，强制增加感官细节
         3. 控制单章推进速度，避免节奏过载
-        4. 若有 ThemeAgent，优先使用题材专项节拍模板
         """
         beats = []
 
@@ -509,15 +417,6 @@ class ContextBuilder:
             "character_intro": "人物引入【塑造技巧】：通过动作或对话来展现人物，不要平铺直叙。对白要能立刻区分出不同角色的性格特点，建立他们的记忆点。",
             "suspense": "悬念铺垫【文学指导】：留下剧情钩子！不要一次性把答案抖露。在结尾营造紧张或神秘气氛，埋下让人欲罢不能的伏笔，保持读者的强烈好奇心。",
         }
-
-        # 合并题材自定义聚焦点说明
-        if self.theme_agent:
-            try:
-                custom_focus = self.theme_agent.get_custom_focus_instructions()
-                if custom_focus:
-                    focus_instructions.update(custom_focus)
-            except Exception as e:
-                logger.warning(f"ThemeAgent.get_custom_focus_instructions 失败（降级跳过）：{e}")
 
         instruction = focus_instructions.get(beat.focus, "")
 
