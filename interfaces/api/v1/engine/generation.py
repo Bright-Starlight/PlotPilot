@@ -30,52 +30,13 @@ from interfaces.api.dependencies import (
     get_auto_bible_generator,
     get_auto_knowledge_generator,
     get_setup_main_plot_suggestion_service,
+    get_continuous_planning_service,
 )
-# from application.services.story_structure_ai_service import StoryStructureAIService  # 已废弃，使用 ContinuousPlanningService
 from application.blueprint.services.continuous_planning_service import ContinuousPlanningService
-from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
-from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
-from application.paths import DATA_DIR
 from application.world.services.auto_bible_generator import AutoBibleGenerator
 from application.world.services.auto_knowledge_generator import AutoKnowledgeGenerator
 
 router = APIRouter(prefix="/novels", tags=["generation"])
-
-
-# 已废弃：StoryStructureAIService 已被 ContinuousPlanningService 替代
-# def get_structure_ai_service() -> StoryStructureAIService:
-#     """获取叙事结构 AI 服务"""
-#     db_path = str(DATA_DIR / "aitext.db")
-#     repository = StoryNodeRepository(db_path)
-#
-#     from application.world.services.bible_service import BibleService
-#     from interfaces.api.dependencies import get_bible_repository
-#
-#     bible_service = BibleService(get_bible_repository())
-#
-#     return StoryStructureAIService(repository, llm_service=None, bible_service=bible_service)
-
-
-def get_continuous_planning_service() -> ContinuousPlanningService:
-    """获取持续规划服务"""
-    db_path = str(DATA_DIR / "aitext.db")
-    story_node_repo = StoryNodeRepository(db_path)
-    chapter_element_repo = ChapterElementRepository(db_path)
-
-    from application.world.services.bible_service import BibleService
-    from interfaces.api.dependencies import get_bible_repository, get_llm_service, get_chapter_repository
-
-    bible_service = BibleService(get_bible_repository())
-    llm_service = get_llm_service()
-    chapter_repository = get_chapter_repository()
-
-    return ContinuousPlanningService(
-        story_node_repo=story_node_repo,
-        chapter_element_repo=chapter_element_repo,
-        llm_service=llm_service,
-        bible_service=bible_service,
-        chapter_repository=chapter_repository
-    )
 
 
 # Request/Response Models

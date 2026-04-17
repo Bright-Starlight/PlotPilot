@@ -967,3 +967,60 @@ def get_foreshadow_ledger_service():
     from application.analyst.services.foreshadow_ledger_service import ForeshadowLedgerService
     return ForeshadowLedgerService(get_foreshadowing_repository())
 
+
+# ──────────────────────────────────────────────────────────────
+# 以下工厂函数补全之前缺失的依赖，消除路由层直接 import infrastructure 的违规
+# ──────────────────────────────────────────────────────────────
+
+def get_triple_repository():
+    """获取三元组仓储（TripleRepository）"""
+    from infrastructure.persistence.database.triple_repository import TripleRepository
+    return TripleRepository()
+
+
+def get_worldbuilding_repository():
+    """获取世界观仓储（WorldbuildingRepository）"""
+    from infrastructure.persistence.database.worldbuilding_repository import WorldbuildingRepository
+    from application.paths import get_db_path
+    return WorldbuildingRepository(get_db_path())
+
+
+def get_worldbuilding_service():
+    """获取世界观服务（WorldbuildingService）"""
+    from application.world.services.worldbuilding_service import WorldbuildingService
+    return WorldbuildingService(get_worldbuilding_repository())
+
+
+def get_prompt_manager():
+    """获取提示词管理器（PromptManager）"""
+    from infrastructure.ai.prompt_manager import get_prompt_manager as _get_pm
+    return _get_pm()
+
+
+def get_knowledge_graph_service():
+    """获取知识图谱推断服务（KnowledgeGraphService）"""
+    from application.world.services.knowledge_graph_service import KnowledgeGraphService
+    from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
+    from application.paths import get_db_path
+    db_path = get_db_path()
+    return KnowledgeGraphService(
+        get_triple_repository(),
+        ChapterElementRepository(db_path),
+        get_story_node_repository(),
+    )
+
+
+def get_continuous_planning_service():
+    """获取 AI 连续规划服务（ContinuousPlanningService）"""
+    from application.blueprint.services.continuous_planning_service import ContinuousPlanningService
+    from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
+    from application.paths import get_db_path
+    db_path = get_db_path()
+    return ContinuousPlanningService(
+        story_node_repo=get_story_node_repository(),
+        chapter_element_repo=ChapterElementRepository(db_path),
+        llm_service=get_llm_service(),
+        bible_service=get_bible_service(),
+        chapter_repository=get_chapter_repository(),
+    )
+

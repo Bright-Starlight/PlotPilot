@@ -17,12 +17,7 @@ from application.blueprint.services.continuous_planning_service import (
     get_macro_plan_progress,
     get_macro_plan_result,
 )
-from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
-from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
-from infrastructure.persistence.database.sqlite_chapter_repository import SqliteChapterRepository
-from domain.ai.services.llm_service import LLMService
-from application.paths import get_db_path
-from interfaces.api.dependencies import get_database
+from interfaces.api.dependencies import get_continuous_planning_service
 
 
 router = APIRouter(prefix="/api/v1/planning", tags=["continuous-planning"])
@@ -63,45 +58,6 @@ class ContinuePlanningRequest(BaseModel):
     current_chapter: int = Field(..., ge=1)
 
 
-# ==================== 依赖注入 ====================
-
-def get_service() -> ContinuousPlanningService:
-    """获取规划服务"""
-    db_path = get_db_path()
-    story_node_repo = StoryNodeRepository(db_path)
-    chapter_element_repo = ChapterElementRepository(db_path)
-
-    # 获取 LLM 服务
-    import os
-    from infrastructure.ai.providers.anthropic_provider import AnthropicProvider
-    from infrastructure.ai.config.settings import Settings
-
-    llm_service = None
-    api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")
-    if api_key:
-        settings = Settings(
-            api_key=api_key.strip(),
-            base_url=os.getenv("ANTHROPIC_BASE_URL")
-        )
-        try:
-            llm_service = AnthropicProvider(settings)
-        except Exception:
-            pass
-
-    from application.world.services.bible_service import BibleService
-    from interfaces.api.dependencies import get_bible_repository
-
-    bible_service = BibleService(get_bible_repository())
-
-    return ContinuousPlanningService(
-        story_node_repo,
-        chapter_element_repo,
-        llm_service,
-        bible_service,
-        chapter_repository=SqliteChapterRepository(get_database()),
-    )
-
-
 # ==================== 宏观规划 API ====================
 
 @router.post("/novels/{novel_id}/macro/generate", status_code=202)
@@ -109,7 +65,7 @@ async def generate_macro_plan(
     novel_id: str,
     request: MacroPlanRequest,
     background_tasks: BackgroundTasks,
-    service: ContinuousPlanningService = Depends(get_service)
+    service: ContinuousPlanningService = Depends(get_continuous_planning_service)
 ):
     """生成宏观规划
 
@@ -171,7 +127,7 @@ async def get_macro_plan_generation_result(novel_id: str):
 async def confirm_macro_plan(
     novel_id: str,
     request: MacroPlanConfirmRequest,
-    service: ContinuousPlanningService = Depends(get_service)
+    service: ContinuousPlanningService = Depends(get_continuous_planning_service)
 ):
     """确认宏观规划（安全版本，带智能合并）
 
@@ -208,7 +164,7 @@ async def confirm_macro_plan(
 async def generate_act_chapters(
     act_id: str,
     request: ActChaptersRequest,
-    service: ContinuousPlanningService = Depends(get_service)
+    service: ContinuousPlanningService = Depends(get_continuous_planning_service)
 ):
     """为指定幕生成章节规划
 
@@ -230,7 +186,7 @@ async def generate_act_chapters(
 async def confirm_act_chapters(
     act_id: str,
     request: ActChaptersConfirmRequest,
-    service: ContinuousPlanningService = Depends(get_service)
+    service: ContinuousPlanningService = Depends(get_continuous_planning_service)
 ):
     """确认幕级规划
 
@@ -254,7 +210,7 @@ async def confirm_act_chapters(
 async def continue_planning(
     novel_id: str,
     request: ContinuePlanningRequest,
-    service: ContinuousPlanningService = Depends(get_service)
+    service: ContinuousPlanningService = Depends(get_continuous_planning_service)
 ):
     """AI 续规划
 
@@ -273,7 +229,7 @@ async def continue_planning(
 @router.post("/acts/{act_id}/create-next")
 async def create_next_act(
     act_id: str,
-    service: ContinuousPlanningService = Depends(get_service)
+    service: ContinuousPlanningService = Depends(get_continuous_planning_service)
 ):
     """创建下一幕
 
@@ -300,7 +256,7 @@ async def create_next_act(
 @router.get("/novels/{novel_id}/structure")
 async def get_novel_structure(
     novel_id: str,
-    service: ContinuousPlanningService = Depends(get_service)
+    service: ContinuousPlanningService = Depends(get_continuous_planning_service)
 ):
     """获取小说的完整结构树"""
     try:
@@ -316,7 +272,7 @@ async def get_novel_structure(
 @router.get("/acts/{act_id}")
 async def get_act_detail(
     act_id: str,
-    service: ContinuousPlanningService = Depends(get_service)
+    service: ContinuousPlanningService = Depends(get_continuous_planning_service)
 ):
     """获取幕的详细信息"""
     try:
@@ -335,7 +291,7 @@ async def get_act_detail(
 @router.get("/chapters/{chapter_id}")
 async def get_chapter_detail(
     chapter_id: str,
-    service: ContinuousPlanningService = Depends(get_service)
+    service: ContinuousPlanningService = Depends(get_continuous_planning_service)
 ):
     """获取章节的详细信息"""
     try:

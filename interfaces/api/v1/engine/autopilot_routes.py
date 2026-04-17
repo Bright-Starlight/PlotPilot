@@ -9,16 +9,14 @@ from pydantic import BaseModel
 from typing import Optional
 from domain.novel.entities.novel import AutopilotStatus, NovelStage
 from domain.novel.value_objects.novel_id import NovelId
-from interfaces.api.dependencies import get_novel_repository, get_chapter_repository
-from application.paths import get_db_path
-from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
+from interfaces.api.dependencies import get_novel_repository, get_chapter_repository, get_story_node_repository
 
 logger = logging.getLogger(__name__)
 
 
 def _has_chapter_nodes_under_current_act(novel_id: str, current_act_zero_based: int) -> bool:
     """当前幕（0-based）下是否已有章节结构节点。有则确认审阅后应直接 WRITING，避免再次跑幕级规划并重复弹确认。"""
-    repo = StoryNodeRepository(get_db_path())
+    repo = get_story_node_repository()
     target_act_number = (current_act_zero_based or 0) + 1
     all_nodes = repo.get_by_novel_sync(novel_id)
     act_nodes = sorted(
