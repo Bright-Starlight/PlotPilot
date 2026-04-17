@@ -1,7 +1,6 @@
 """Fixtures for API integration tests."""
 
 import pytest
-from pathlib import Path
 from fastapi.testclient import TestClient
 from infrastructure.persistence.database.connection import DatabaseConnection
 from infrastructure.persistence.database.sqlite_entity_base_repository import (
@@ -11,23 +10,11 @@ from infrastructure.persistence.database.sqlite_narrative_event_repository impor
     SqliteNarrativeEventRepository
 )
 
-# pathlib: parents[0]==parent；v1/conftest.py → 仓库根为 parents[5]
-SCHEMA_PATH = (
-    Path(__file__).resolve().parents[5]
-    / "infrastructure"
-    / "persistence"
-    / "database"
-    / "schema.sql"
-)
-
-
 @pytest.fixture
-def db():
-    """In-memory database fixture."""
-    db = DatabaseConnection(":memory:")
-    schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    db.get_connection().executescript(schema_sql)
-    db.get_connection().commit()
+def db(tmp_path):
+    """File-backed database fixture for cross-thread FastAPI tests."""
+    db_path = tmp_path / "test-api.sqlite3"
+    db = DatabaseConnection(str(db_path))
     yield db
     db.close()
 

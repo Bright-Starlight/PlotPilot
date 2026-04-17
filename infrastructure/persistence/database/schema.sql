@@ -530,6 +530,63 @@ CREATE TABLE IF NOT EXISTS chapter_generation_metrics (
 CREATE INDEX IF NOT EXISTS idx_chapter_generation_metrics_novel
     ON chapter_generation_metrics(novel_id, chapter_number);
 
+CREATE TABLE IF NOT EXISTS beat_sheets (
+    id TEXT PRIMARY KEY,
+    chapter_id TEXT NOT NULL UNIQUE,
+    data TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ========== 章节融合（Fusion）==========
+CREATE TABLE IF NOT EXISTS fusion_jobs (
+    fusion_job_id TEXT PRIMARY KEY,
+    chapter_id TEXT NOT NULL,
+    novel_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    state_lock_version INTEGER NOT NULL,
+    beat_ids_json TEXT NOT NULL DEFAULT '[]',
+    target_words INTEGER NOT NULL DEFAULT 0,
+    suspense_budget_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'queued',
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS chapter_fusion_drafts (
+    fusion_id TEXT PRIMARY KEY,
+    fusion_job_id TEXT NOT NULL UNIQUE,
+    chapter_id TEXT NOT NULL,
+    source_beat_ids_json TEXT NOT NULL DEFAULT '[]',
+    plan_version INTEGER NOT NULL,
+    state_lock_version INTEGER NOT NULL,
+    text TEXT NOT NULL DEFAULT '',
+    repeat_ratio REAL NOT NULL DEFAULT 0.0,
+    facts_confirmed_json TEXT NOT NULL DEFAULT '[]',
+    open_questions_json TEXT NOT NULL DEFAULT '[]',
+    end_state_json TEXT NOT NULL DEFAULT '{}',
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (fusion_job_id) REFERENCES fusion_jobs(fusion_job_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS fusion_job_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fusion_job_id TEXT NOT NULL,
+    chapter_id TEXT NOT NULL,
+    step_name TEXT NOT NULL,
+    step_status TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (fusion_job_id) REFERENCES fusion_jobs(fusion_job_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_fusion_jobs_chapter ON fusion_jobs(chapter_id);
+CREATE INDEX IF NOT EXISTS idx_fusion_job_logs_job ON fusion_job_logs(fusion_job_id, id);
+
 -- ========== 语义化快照系统（战役三 Task 12）==========
 -- Git-like 版本控制，只存指针不存正文深拷贝
 CREATE TABLE IF NOT EXISTS novel_snapshots (

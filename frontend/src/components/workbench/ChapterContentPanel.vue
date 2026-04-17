@@ -56,7 +56,7 @@
                     <n-tag :type="getBeatTypeColor(beat.focus)" size="small" round>
                       {{ beat.focus }}
                     </n-tag>
-                    <n-text strong style="margin-left: 8px">Beat {{ i + 1 }}</n-text>
+                    <n-text strong style="margin-left: 8px">节拍 {{ i + 1 }}</n-text>
                     <n-text depth="3" style="margin-left: 8px; font-size: 12px">
                       ({{ beat.target_words }}字)
                     </n-text>
@@ -65,6 +65,86 @@
                 </div>
               </n-space>
               <n-empty v-else description="章节生成时自动创建微观节拍" size="small" />
+            </n-tab-pane>
+          </n-tabs>
+        </n-card>
+
+        <!-- 融合预览 -->
+        <n-card size="small" :bordered="true" class="fusion-card">
+          <template #header>
+            <span class="card-title">🧩 融合草稿</span>
+          </template>
+          <template #header-extra>
+            <n-space :size="6">
+              <n-button size="tiny" secondary @click="fusionModalVisible = true">
+                预览
+              </n-button>
+              <n-button size="tiny" type="primary" :loading="fusionLoading" @click="createFusionJob">
+                整章融合
+              </n-button>
+            </n-space>
+          </template>
+
+          <n-tabs type="segment" size="small" animated>
+            <n-tab-pane name="beats" tab="节拍草稿">
+              <n-space vertical :size="8">
+                <n-alert v-if="fusionWarningLines.length" type="warning" :show-icon="true" size="small">
+                  {{ fusionWarningLines[0] }}
+                </n-alert>
+                <n-empty v-if="!fusionBeatDrafts.length" description="暂无节拍草稿" size="small" />
+                <n-list v-else hoverable bordered>
+                  <n-list-item v-for="beat in fusionBeatDrafts" :key="beat.id">
+                    <n-space vertical :size="4" style="width: 100%">
+                      <n-space align="center" :size="8" justify="space-between">
+                        <n-text strong>{{ beat.title }}</n-text>
+                        <n-tag size="tiny" round>{{ beat.id }}</n-tag>
+                      </n-space>
+                      <n-text depth="3" style="font-size: 12px; white-space: pre-wrap">{{ beat.text }}</n-text>
+                    </n-space>
+                  </n-list-item>
+                </n-list>
+              </n-space>
+            </n-tab-pane>
+
+            <n-tab-pane name="fusion" tab="融合草稿">
+              <n-empty v-if="!fusionDraft" description="尚未生成融合稿" size="small" />
+              <n-space v-else vertical :size="8">
+                <n-space :size="8" wrap>
+                  <n-tag size="small" type="success" round>{{ fusionState }}</n-tag>
+                  <n-tag size="small" round>重复率 {{ Math.round((fusionDraft.estimated_repeat_ratio || 0) * 100) }}%</n-tag>
+                </n-space>
+                <n-alert v-if="fusionDraft.warnings.length" type="warning" :show-icon="true" size="small">
+                  {{ fusionDraft.warnings[0] }}
+                </n-alert>
+                <n-input :value="fusionDraft.text" type="textarea" :autosize="{ minRows: 8, maxRows: 20 }" readonly />
+              </n-space>
+            </n-tab-pane>
+
+            <n-tab-pane name="diff" tab="差异对比">
+              <n-space vertical :size="10">
+                <n-alert type="info" :show-icon="false" size="small">
+                  左侧是节拍草稿摘要，右侧是当前融合草稿。此处用来查看融合是否过度压缩或丢失桥接。
+                </n-alert>
+                <div class="fusion-diff-grid">
+                  <div class="fusion-diff-col">
+                    <n-text strong class="diff-col-title">节拍来源</n-text>
+                    <n-scrollbar style="max-height: 280px">
+                      <n-space vertical :size="8">
+                        <n-text v-for="beat in fusionBeatDrafts" :key="beat.id" depth="3" style="font-size: 12px; white-space: pre-wrap">
+                          • {{ beat.text }}
+                        </n-text>
+                      </n-space>
+                    </n-scrollbar>
+                  </div>
+                  <div class="fusion-diff-col">
+                    <n-text strong class="diff-col-title">融合输出</n-text>
+                    <n-scrollbar style="max-height: 280px">
+                      <n-text v-if="fusionDraft" style="font-size: 12px; white-space: pre-wrap">{{ fusionDraft.text }}</n-text>
+                      <n-empty v-else description="尚未生成" size="small" />
+                    </n-scrollbar>
+                  </div>
+                </div>
+              </n-space>
             </n-tab-pane>
           </n-tabs>
         </n-card>
@@ -148,20 +228,48 @@
             </div>
           </n-space>
         </n-card>
+
+        <n-modal v-model:show="fusionModalVisible" preset="card" title="融合预览" style="width: min(760px, 96vw);">
+          <n-space vertical :size="14">
+            <n-alert type="info" :show-icon="true">
+              预览基于当前章节规划、节拍线索与知识章末摘要推导。正式融合会写入融合任务记录。
+            </n-alert>
+            <n-descriptions :column="2" bordered size="small" label-placement="left">
+              <n-descriptions-item label="预计字数">{{ fusionPreview.estimated_words }}</n-descriptions-item>
+              <n-descriptions-item label="预计重复率">{{ Math.round(fusionPreview.estimated_repeat_ratio * 100) }}%</n-descriptions-item>
+              <n-descriptions-item label="预计终态" :span="2">
+                {{ formatPreviewState(fusionPreview.expected_end_state) }}
+              </n-descriptions-item>
+              <n-descriptions-item label="预计悬念数">{{ fusionPreview.expected_suspense_count }}</n-descriptions-item>
+              <n-descriptions-item label="预警数">{{ fusionPreview.risk_warnings.length }}</n-descriptions-item>
+            </n-descriptions>
+            <n-space v-if="fusionPreview.risk_warnings.length" vertical :size="8">
+              <n-alert v-for="(warn, index) in fusionPreview.risk_warnings" :key="index" type="warning" :show-icon="true" size="small">
+                {{ warn }}
+              </n-alert>
+            </n-space>
+            <n-space justify="end">
+              <n-button @click="fusionModalVisible = false">关闭</n-button>
+              <n-button type="primary" :loading="fusionLoading" @click="createFusionJob">开始融合</n-button>
+            </n-space>
+          </n-space>
+        </n-modal>
       </n-space>
     </n-scrollbar>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, computed } from 'vue'
+import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
 import { storeToRefs } from 'pinia'
+import { useMessage } from 'naive-ui'
 import { useWorkbenchRefreshStore } from '../../stores/workbenchRefreshStore'
 import { planningApi } from '../../api/planning'
 import type { StoryNode } from '../../api/planning'
 import { knowledgeApi } from '../../api/knowledge'
 import type { ChapterSummary } from '../../api/knowledge'
 import { bibleApi, type CharacterDTO } from '../../api/bible'
+import { chapterFusionApi, type FusionJobDTO, type FusionPreviewDTO } from '../../api/chapterFusion'
 import type { AutopilotChapterAudit } from './ChapterStatusPanel.vue'
 
 const props = withDefaults(
@@ -181,6 +289,10 @@ const props = withDefaults(
 const storyNodeNotFound = ref(false)
 const chapterPlan = ref<StoryNode | null>(null)
 const knowledgeChapter = ref<ChapterSummary | null>(null)
+const fusionJob = ref<FusionJobDTO | null>(null)
+const fusionLoading = ref(false)
+const fusionModalVisible = ref(false)
+const fusionPollTimer = ref<ReturnType<typeof setInterval> | null>(null)
 
 // Bible 数据用于 ID -> name 映射
 const bibleCharacters = ref<CharacterDTO[]>([])
@@ -209,6 +321,132 @@ const beatLines = computed(() => {
   if (!ol) return []
   return ol.split(/\n+/).map(s => s.trim()).filter(s => s.length > 0)
 })
+
+const fusionBeatDrafts = computed(() => {
+  const beats = beatLines.value.length > 0 ? beatLines.value : ['承接前情，推进主线', '制造转折与压力', '收束到章节终态']
+  return beats.map((line, index) => ({
+    id: `beat-${props.currentChapterNumber ?? 0}-${index + 1}`,
+    title: line.slice(0, 24) || `Beat ${index + 1}`,
+    text: line,
+  }))
+})
+
+const fusionPreview = computed<FusionPreviewDTO>(() => {
+  const drafts = fusionBeatDrafts.value
+  const normalized = drafts.map(item => item.text.replace(/\s+/g, '').toLowerCase())
+  const unique = new Set(normalized.filter(Boolean))
+  const duplicateCount = Math.max(0, normalized.length - unique.size)
+  const repeatRatio = normalized.length > 0 ? duplicateCount / normalized.length : 0
+  const estimatedWords = Math.max(1200, drafts.reduce((sum, item) => sum + Math.max(180, item.text.length * 2), 0))
+  const endState = knowledgeChapter.value?.ending_state
+    ? { ending_state: knowledgeChapter.value.ending_state }
+    : { chapter_end: chapterPlan.value?.timeline_end || chapterPlan.value?.title || '章节终态' }
+  const warnings: string[] = []
+  if (repeatRatio > 0.15) warnings.push('重复功能偏高，建议先回到节拍层去重')
+  if (!beatLines.value.length) warnings.push('未检出明确节拍文本，融合预览基于章节摘要推导')
+  return {
+    estimated_words: estimatedWords,
+    estimated_repeat_ratio: Number(repeatRatio.toFixed(2)),
+    expected_end_state: endState,
+    expected_suspense_count: Math.max(1, Math.min(5, drafts.length + 1)),
+    risk_warnings: warnings,
+  }
+})
+
+const fusionDraft = computed(() => fusionJob.value?.fusion_draft ?? null)
+const fusionState = computed(() => fusionJob.value?.status ?? 'idle')
+const fusionWarningLines = computed(() => fusionDraft.value?.warnings?.length ? fusionDraft.value.warnings : fusionPreview.value.risk_warnings)
+
+const fusionStorageKey = computed(() => `plotpilot:fusion-job:${props.slug}:${props.currentChapterNumber ?? 'none'}`)
+
+function loadStoredFusionJobId(): string | null {
+  try {
+    return window.localStorage.getItem(fusionStorageKey.value)
+  } catch {
+    return null
+  }
+}
+
+function persistFusionJobId(jobId: string) {
+  try {
+    window.localStorage.setItem(fusionStorageKey.value, jobId)
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearFusionPoll() {
+  if (fusionPollTimer.value) {
+    clearInterval(fusionPollTimer.value)
+    fusionPollTimer.value = null
+  }
+}
+
+async function loadFusionJob(fusionJobId: string) {
+  fusionLoading.value = true
+  try {
+    const job = await chapterFusionApi.getFusionJob(fusionJobId)
+    fusionJob.value = job
+    if (job.status === 'queued' || job.status === 'running') {
+      clearFusionPoll()
+      fusionPollTimer.value = window.setInterval(() => {
+        void loadFusionJob(fusionJobId)
+      }, 1600)
+    } else {
+      clearFusionPoll()
+    }
+  } catch {
+    fusionJob.value = null
+    clearFusionPoll()
+  } finally {
+    fusionLoading.value = false
+  }
+}
+
+async function loadLatestFusionJob() {
+  const jobId = loadStoredFusionJobId()
+  if (!jobId) {
+    fusionJob.value = null
+    clearFusionPoll()
+    return
+  }
+  await loadFusionJob(jobId)
+}
+
+async function createFusionJob() {
+  const chapterNumber = props.currentChapterNumber
+  if (!props.slug || !chapterNumber || fusionLoading.value) return
+  fusionLoading.value = true
+  try {
+    const planVersion = Number((chapterPlan.value?.metadata as Record<string, unknown> | undefined)?.version ?? 1)
+    const stateLockVersion = Number((chapterPlan.value?.metadata as Record<string, unknown> | undefined)?.state_lock_version ?? 1)
+    const targetWords = Math.max(1800, fusionBeatDrafts.value.length * 900)
+    const beatIds = fusionBeatDrafts.value.map(item => item.id)
+    const suspenseBudget = {
+      primary: 1,
+      secondary: Math.max(1, Math.min(3, fusionBeatDrafts.value.length - 1)),
+    }
+    const job = await chapterFusionApi.createFusionJob(props.slug, {
+      plan_version: planVersion,
+      state_lock_version: stateLockVersion,
+      beat_ids: beatIds,
+      target_words: targetWords,
+      suspense_budget: suspenseBudget,
+    })
+    persistFusionJobId(job.fusion_job_id)
+    fusionJob.value = job
+    clearFusionPoll()
+    fusionPollTimer.value = window.setInterval(() => {
+      void loadFusionJob(job.fusion_job_id)
+    }, 1600)
+    fusionModalVisible.value = false
+    message.success('融合任务已创建')
+  } catch {
+    message.error('创建融合任务失败')
+  } finally {
+    fusionLoading.value = false
+  }
+}
 
 const showBeatsCard = computed(() => {
   if (!props.currentChapterNumber) return false
@@ -260,6 +498,12 @@ function formatTime(t: string) {
   } catch {
     return t
   }
+}
+
+function formatPreviewState(state: Record<string, unknown>): string {
+  const entries = Object.entries(state || {})
+  if (!entries.length) return '—'
+  return entries.map(([k, v]) => `${k}: ${String(v)}`).join(' / ')
 }
 
 function findChapterNode(nodes: StoryNode[], num: number): StoryNode | null {
@@ -328,6 +572,7 @@ watch(() => props.slug, async (slug) => {
 watch(() => props.currentChapterNumber, async () => {
   await resolveStoryNode()
   await loadKnowledgeChapter()
+  await loadLatestFusionJob()
 }, { immediate: false })
 
 const refreshStore = useWorkbenchRefreshStore()
@@ -335,13 +580,26 @@ const { deskTick } = storeToRefs(refreshStore)
 watch(deskTick, async () => {
   await resolveStoryNode()
   await loadKnowledgeChapter()
+  await loadLatestFusionJob()
 })
 
 onMounted(async () => {
   await loadBible()
   await resolveStoryNode()
   await loadKnowledgeChapter()
+  await loadLatestFusionJob()
 })
+
+watch(
+  () => [props.slug, props.currentChapterNumber] as const,
+  async () => {
+    await loadLatestFusionJob()
+  }
+)
+
+const message = useMessage()
+
+onUnmounted(() => clearFusionPoll())
 </script>
 
 <style scoped>
@@ -403,6 +661,31 @@ onMounted(async () => {
 
 .micro-beat-item:hover .micro-beat-desc {
   border-left-color: var(--n-primary-color);
+}
+
+.fusion-card {
+  border-color: rgba(14, 165, 233, 0.16);
+  background: linear-gradient(180deg, rgba(14, 165, 233, 0.03) 0%, rgba(99, 102, 241, 0.02) 100%);
+}
+
+.fusion-diff-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.fusion-diff-col {
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--n-border-color);
+  background: var(--n-color-modal);
+  min-height: 220px;
+}
+
+.diff-col-title {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 12px;
 }
 
 /* 审阅行 */

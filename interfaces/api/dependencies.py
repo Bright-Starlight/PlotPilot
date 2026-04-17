@@ -26,6 +26,8 @@ from infrastructure.persistence.database.sqlite_plot_arc_repository import Sqlit
 from infrastructure.persistence.database.sqlite_voice_vault_repository import SqliteVoiceVaultRepository
 from infrastructure.persistence.database.sqlite_voice_fingerprint_repository import SQLiteVoiceFingerprintRepository
 from infrastructure.persistence.database.sqlite_chapter_generation_metrics_repository import SqliteChapterGenerationMetricsRepository
+from infrastructure.persistence.database.sqlite_beat_sheet_repository import SqliteBeatSheetRepository
+from infrastructure.persistence.database.sqlite_chapter_fusion_repository import SqliteChapterFusionRepository
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.database.sqlite_cast_repository import SqliteCastRepository
 from infrastructure.persistence.database.sqlite_foreshadowing_repository import SqliteForeshadowingRepository
@@ -35,6 +37,7 @@ from application.ai.llm_control_service import LLMControlService
 
 from application.core.services.novel_service import NovelService
 from application.core.services.chapter_service import ChapterService
+from application.core.services.chapter_fusion_service import ChapterFusionService
 from application.world.services.bible_service import BibleService
 from application.world.services.cast_service import CastService
 from application.world.services.knowledge_service import KnowledgeService
@@ -226,6 +229,15 @@ def get_chapter_service() -> ChapterService:
         get_novel_repository(),
         review_repo,
         SqliteChapterGenerationMetricsRepository(get_database()),
+    )
+
+
+def get_chapter_fusion_service() -> ChapterFusionService:
+    """获取章节融合服务。"""
+    return ChapterFusionService(
+        chapter_repository=get_chapter_repository(),
+        beat_sheet_repository=SqliteBeatSheetRepository(get_database()),
+        fusion_repository=SqliteChapterFusionRepository(get_database()),
     )
 
 

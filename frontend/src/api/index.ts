@@ -3,6 +3,7 @@ export * from './config'
 export * from './llmControl'
 export * from './novel'
 export { chapterApi } from './chapter'
+export { chapterFusionApi } from './chapterFusion'
 export type {
   UpdateChapterRequest,
   ChapterReviewDTO,

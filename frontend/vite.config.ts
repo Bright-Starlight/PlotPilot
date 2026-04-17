@@ -5,6 +5,12 @@ import { resolve } from 'path'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [vue()],
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: './src/test/setup.ts',
+    include: ['src/**/*.{test,spec}.{ts,tsx,vue}'],
+  },
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),
