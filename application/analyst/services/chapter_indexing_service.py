@@ -64,8 +64,11 @@ class ChapterIndexingService:
             RuntimeError: 如果创建 collection 失败
         """
         collection_name = self._get_collection_name(novel_id)
-        # 始终调用 create_collection：内部会检查维度是否匹配，
-        # 匹配则跳过，不匹配则自动重建（嵌入模型切换时必要）
+        existing_collections = await self._vector_store.list_collections()
+
+        if collection_name in existing_collections:
+            return
+
         await self._vector_store.create_collection(
             collection=collection_name,
             dimension=self._embedding_dimension
