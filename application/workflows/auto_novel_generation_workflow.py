@@ -14,6 +14,7 @@ from application.engine.services.word_control_service import (
     WordControlService,
     effective_length,
 )
+from application.engine.services.chapter_output_sanitizer import sanitize_chapter_output
 from application.analyst.services.state_extractor import StateExtractor
 from application.analyst.services.state_updater import StateUpdater
 from application.audit.services.conflict_detection_service import ConflictDetectionService
@@ -459,13 +460,14 @@ class AutoNovelGenerationWorkflow:
             outline=outline,
             target_word_count=target_word_count,
         )
+        content = sanitize_chapter_output(content)
 
         logger.info("阶段 4: 后处理（post_process_generated_chapter）")
         post = await self.post_process_generated_chapter(
             novel_id, chapter_number, outline, content, scene_director=scene_director
         )
         seam_rewrite_info = post.get("seam_rewrite_info") or {}
-        content = post.get("content") or content
+        content = sanitize_chapter_output(post.get("content") or content)
         style_warnings = post["style_warnings"]
         consistency_report = post["consistency_report"]
         ghost_annotations = post["ghost_annotations"]
@@ -669,6 +671,7 @@ class AutoNovelGenerationWorkflow:
                 target_word_count=target_word_count,
                 emit_event=emit_word_control_event,
             )
+            content = sanitize_chapter_output(content)
             for buffered_event in events_buffer:
                 yield buffered_event
             post = await self.post_process_generated_chapter(
@@ -676,7 +679,7 @@ class AutoNovelGenerationWorkflow:
             )
             seam_rewrite_info = post.get("seam_rewrite_info") or {}
             original_content = content
-            content = post.get("content") or content
+            content = sanitize_chapter_output(post.get("content") or content)
             style_warnings = post["style_warnings"]
             consistency_report = post["consistency_report"]
             ghost_annotations = post["ghost_annotations"]

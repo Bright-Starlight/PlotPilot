@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 from domain.ai.services.llm_service import GenerationConfig, GenerationResult
 from domain.ai.value_objects.prompt import Prompt
 from domain.ai.value_objects.token_usage import TokenUsage
+from application.engine.services.chapter_output_sanitizer import sanitize_chapter_output
 from infrastructure.ai.config.settings import Settings
 from .base import BaseProvider
 
@@ -106,8 +107,10 @@ class OpenAIProvider(BaseProvider):
                 "falling back to streaming aggregation"
             )
             content, token_usage = await self._generate_via_stream(request_kwargs)
+            content = sanitize_chapter_output(content)
             return GenerationResult(content=content, token_usage=token_usage)
 
+        content = sanitize_chapter_output(content)
         input_tokens = response.usage.prompt_tokens if response.usage else 0
         output_tokens = response.usage.completion_tokens if response.usage else 0
         return GenerationResult(
@@ -301,6 +304,7 @@ class OpenAIProvider(BaseProvider):
                 output_tokens = getattr(usage, "completion_tokens", 0) or 0
 
         content = "".join(parts).strip()
+        content = sanitize_chapter_output(content)
         if not content:
             raise RuntimeError("API returned empty content")
 

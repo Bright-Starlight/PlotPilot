@@ -97,6 +97,24 @@ class TestAnthropicProvider:
         assert result.content == '{"ok": true}'
 
     @pytest.mark.asyncio
+    async def test_generate_ignores_thinking_blocks(self, provider):
+        """测试思考块不会被拼进正文。"""
+        prompt = Prompt(system="You are helpful", user="Hello")
+        config = GenerationConfig()
+
+        provider.async_client.messages.create = AsyncMock(return_value=Mock(
+            content=[
+                Mock(type="thinking", thinking="我在分析"),
+                Mock(type="text", text="真正的正文"),
+            ],
+            usage=Mock(input_tokens=10, output_tokens=5)
+        ))
+
+        result = await provider.generate(prompt, config)
+
+        assert result.content == "真正的正文"
+
+    @pytest.mark.asyncio
     async def test_generate_accepts_json_blocks(self, provider):
         """测试 JSON block 可回退为字符串内容。"""
         prompt = Prompt(system="You are helpful", user="Hello")

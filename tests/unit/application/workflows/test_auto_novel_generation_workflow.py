@@ -192,6 +192,38 @@ class TestGenerateChapter:
         assert result.word_control.target == 20
         assert result.word_control.status in {"ok", "too_short", "too_long"}
 
+    @pytest.mark.asyncio
+    async def test_generate_chapter_sanitizes_ai_thinking_content(self, workflow, mock_llm_service):
+        workflow.state_extractor = AsyncMock()
+        workflow.state_extractor.extract_chapter_state = AsyncMock(return_value=ChapterState(
+            new_characters=[],
+            character_actions=[],
+            relationship_changes=[],
+            foreshadowing_planted=[],
+            foreshadowing_resolved=[],
+            events=[],
+        ))
+        mock_llm_service.generate = AsyncMock(return_value=LLMResult(
+            content=(
+                "沈惊鸿的目光骤然收紧。\n\n"
+                "让我分析一下当前的情况：\n\n"
+                "1. 当前字数：2398 字\n\n"
+                "2. 目标字数：3000 字\n\n"
+                "3. 需要补写：约 602 字"
+            ),
+            token_usage=TokenUsage(input_tokens=500, output_tokens=500),
+        ))
+
+        result = await workflow.generate_chapter(
+            novel_id="novel-1",
+            chapter_number=1,
+            outline="Chapter 1 outline",
+            enable_beats=False,
+        )
+
+        assert result.content == "沈惊鸿的目光骤然收紧。"
+        assert "当前字数" not in result.content
+
 
 class TestGenerateChapterWithReview:
     """测试 generate_chapter_with_review 方法"""

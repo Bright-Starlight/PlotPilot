@@ -9,6 +9,7 @@ from anthropic import Anthropic, AsyncAnthropic
 from domain.ai.services.llm_service import GenerationConfig, GenerationResult
 from domain.ai.value_objects.prompt import Prompt
 from domain.ai.value_objects.token_usage import TokenUsage
+from application.engine.services.chapter_output_sanitizer import sanitize_chapter_output
 from infrastructure.ai.config.settings import Settings
 from .base import BaseProvider
 
@@ -34,6 +35,8 @@ def _extract_text_from_content_block(block: Any) -> str:
 
     for attr in ("thinking", "input", "arguments", "content", "json"):
         value = getattr(block, attr, None)
+        if attr == "thinking":
+            continue
         if isinstance(value, str) and value.strip():
             return value
         if value is not None and attr in {"input", "arguments", "content", "json"} and _is_json_like(value):
@@ -44,6 +47,8 @@ def _extract_text_from_content_block(block: Any) -> str:
 
     if isinstance(block, dict):
         for key in ("text", "thinking", "content", "value", "input", "arguments"):
+            if key == "thinking":
+                continue
             value = block.get(key)
             if isinstance(value, str) and value.strip():
                 return value
@@ -59,17 +64,17 @@ def _extract_text_from_content_block(block: Any) -> str:
                 return str(block["json"])
 
     block_type = getattr(block, "type", None)
-    if block_type in {"json", "input_json", "output_json", "tool_use", "thinking"}:
+    if block_type in {"json", "input_json", "output_json", "tool_use"}:
         json_payload = getattr(block, "json", None)
         if json_payload is not None:
             try:
                 return json.dumps(json_payload, ensure_ascii=False)
             except Exception:
                 return str(json_payload)
-        if block_type == "thinking":
-            thinking = getattr(block, "thinking", None)
-            if isinstance(thinking, str) and thinking.strip():
-                return thinking
+
+    if block_type == "thinking":
+        # 思考块不属于正文，直接忽略，避免写入章节内容。
+        return ""
 
     return ""
 
@@ -195,6 +200,7 @@ class AnthropicProvider(BaseProvider):
                     parts.append(text)
 
             content = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+            content = sanitize_chapter_output(content)
             if not content:
                 # 记录完整响应供诊断
                 # 修复问题 12：安全提取 usage 属性，避免 usage 结构不同时抛出异常
