@@ -101,8 +101,10 @@ const message = useMessage()
 const dialog = useDialog()
 
 // 容器宽度响应式
+// 只有在极窄侧栏时才隐藏章节状态/字数，避免正常工作台宽度下丢失关键信息。
+const COMPACT_WIDTH_THRESHOLD = 238
 const containerWidth = ref(558)
-const isNarrow = computed(() => containerWidth.value < 436)
+const isNarrow = computed(() => containerWidth.value < COMPACT_WIDTH_THRESHOLD)
 
 const loading = ref(false)
 /** 全托管时空侧栏提示：避免与「启动结构规划」主按钮混淆 */
@@ -205,7 +207,7 @@ const convertToTreeNode = (node: StoryNode): any => {
     chapter: '📄',
   }
   const n = node.number
-  const isNarrow = containerWidth.value < 238
+  const isNarrow = containerWidth.value < COMPACT_WIDTH_THRESHOLD
   let displayName = node.title
 
   if (node.node_type === 'chapter' && typeof n === 'number' && n >= 1) {
