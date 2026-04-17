@@ -652,7 +652,8 @@ onUnmounted(() => {
   background: linear-gradient(135deg, rgba(24, 160, 88, 0.05) 0%, rgba(24, 160, 88, 0.02) 100%);
   border: 1px solid rgba(24, 160, 88, 0.15);
   border-radius: 12px;
-  padding: 16px 18px;
+  padding: 10px 8px;
+  /* padding: 14px 16px; */
   display: flex;
   flex-direction: column;
   gap: 12px;

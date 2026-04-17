@@ -157,6 +157,12 @@
             @chapter-content-update="handleChapterContentUpdate"
           />
         </div>
+        <!-- 监控说明：独立区域，避免被折叠遮挡 -->
+        <n-alert type="default" :show-icon="false" class="monitor-copy-hint">
+          <n-text depth="3" style="font-size: 12px; line-height: 1.5">
+            <strong>监控说明</strong>：「文风」卡片为按<strong>角色声线</strong>的偏离监测。全书<strong>作者文风指纹</strong>与侧栏「剧本基建」规划为不同能力，与此处互补。
+          </n-text>
+        </n-alert>
         <div class="managed-monitor">
           <AutopilotDashboard :novel-id="slug" />
         </div>
@@ -1141,12 +1147,45 @@ defineExpose({ ensureAssistedMode })
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto; /* 整体垂直滚动 */
+  /* 滚动条默认隐藏，悬停时显示 */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.managed-stack:hover {
+  scrollbar-color: var(--n-scrollbar-color, rgba(0,0,0,0.25)) transparent;
+}
+
+/* WebKit 浏览器滚动条样式 */
+.managed-stack::-webkit-scrollbar {
+  width: 6px;
+}
+
+.managed-stack::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.managed-stack::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+
+.managed-stack:hover::-webkit-scrollbar-thumb {
+  background: var(--n-scrollbar-color, rgba(0,0,0,0.25));
 }
 
 .managed-daemon-hint {
   flex-shrink: 0;
-  margin: 0 16px 10px;
+  margin: 8px 8px 8px 8px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* 监控说明：独立区域，避免被折叠遮挡 */
+.monitor-copy-hint {
+  flex-shrink: 0;
+  /* margin: 0 8px 8px; */
   font-size: 12px;
   line-height: 1.55;
 }
@@ -1163,18 +1202,14 @@ defineExpose({ ensureAssistedMode })
 }
 
 .managed-monitor {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
+  flex-shrink: 0; /* 高度由内容撑开，不压缩 */
   display: flex;
   flex-direction: column;
   background: var(--app-surface);
 }
 
 .managed-monitor :deep(.autopilot-dashboard) {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+  /* 移除 flex:1 和 overflow-y:auto，高度由内容自然撑开 */
 }
 
 .work-header {
@@ -1202,7 +1237,7 @@ defineExpose({ ensureAssistedMode })
 }
 
 .autopilot-container {
-  padding: 16px 20px;
+  padding: 0px 8px 8px 8px;
   background: linear-gradient(to bottom, var(--app-surface) 0%, rgba(24, 160, 88, 0.02) 100%);
   border-bottom: 1px solid var(--aitext-split-border);
 }

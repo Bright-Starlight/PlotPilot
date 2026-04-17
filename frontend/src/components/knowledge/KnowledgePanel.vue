@@ -1,13 +1,8 @@
 <template>
   <div class="kp-root">
-    <header class="kp-hero">
-      <div class="kp-hero-copy">
-        <h3 class="kp-title">侧栏资料</h3>
-        <p class="kp-lead">
-          可在「检索与编辑」「叙事知识」「关系图」间切换：检索与编辑含全书知识检索、三元组图谱与表格编辑；叙事含<strong>分章叙事</strong>与实体状态；<strong>梗概锁定已迁至右侧「剧本基建 → 作品设定」</strong>。<strong>关系图从知识库三元组自动生成</strong>（人物网 / 地点图全页与工作台均可打开「三元组表格」编辑）。书目级梗概以
-          <strong>manifest</strong> 为准。
-        </p>
-      </div>
+    <!-- 标题与按钮行 -->
+    <div class="kp-header-row">
+      <h3 class="kp-title">侧栏资料</h3>
       <n-space v-show="sideTab === 'narrative'" :size="8" align="center" style="flex-shrink:0">
         <n-button
           size="small"
@@ -28,6 +23,15 @@
           保存到全书上下文
         </n-button>
       </n-space>
+    </div>
+
+    <header class="kp-hero">
+      <div class="kp-hero-copy">
+        <p class="kp-lead">
+          可在「检索与编辑」「叙事知识」「关系图」间切换：检索与编辑含全书知识检索、三元组图谱与表格编辑；叙事含<strong>分章叙事</strong>与实体状态；<strong>梗概锁定已迁至右侧「剧本基建 → 作品设定」</strong>。<strong>关系图从知识库三元组自动生成</strong>（人物网 / 地点图全页与工作台均可打开「三元组表格」编辑）。书目级梗概以
+          <strong>manifest</strong> 为准。
+        </p>
+      </div>
     </header>
 
     <n-radio-group v-model:value="sideTab" class="kp-seg" size="small">
@@ -821,17 +825,33 @@ onUnmounted(() => {
   background: linear-gradient(180deg, var(--app-surface-subtle) 0%, var(--app-border) 100%);
 }
 
-.kp-hero {
+/* 标题与按钮行 */
+.kp-header-row {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: 12px;
-  margin-bottom: 10px;
+  padding: 10px 12px 6px;
   flex-shrink: 0;
 }
 
+.kp-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-shrink: 0;
+  padding: 0 12px;
+}
+
+.kp-hero-copy {
+  flex: 1;
+  min-width: 0;
+}
+
 .kp-title {
-  margin: 0 0 6px;
+  margin: 0;
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -843,7 +863,12 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 1.65;
   color: #475569;
-  max-width: 520px;
+  /* 允许文本折叠，确保按钮始终在同一行 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 
 .kp-lead strong {

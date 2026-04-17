@@ -4,19 +4,19 @@
       与<strong>中栏 · 托管撰稿 · 监控大盘</strong>中的伏笔统计、列表使用<strong>同一套账本数据</strong>（foreshadow-ledger）；此处为编辑与核销入口。
     </n-alert>
     <header class="panel-header">
-      <div class="header-main">
-        <div class="title-row">
-          <h3 class="panel-title">伏笔账本</h3>
-          <n-tag size="small" round :bordered="false">Foreshadow Ledger</n-tag>
+      <!-- 标题行：title + badge + 按钮同行 -->
+      <div class="title-row">
+        <h3 class="panel-title">伏笔账本</h3>
+        <n-tag size="small" round :bordered="false">Foreshadow Ledger</n-tag>
+        <div class="header-actions">
+          <n-button size="small" secondary @click="openCreateModal">+ 添加伏笔</n-button>
+          <n-button size="small" type="primary" :loading="loading" @click="load">刷新</n-button>
         </div>
-        <p class="panel-lead">
-          <strong>写</strong>：人工埋设或章后 NLP 异步入库；<strong>读</strong>：供「本章建议」向量/启发式检索与上下文全局池，监控大盘统计回收率。
-        </p>
       </div>
-      <n-space class="header-actions" :size="8" align="center">
-        <n-button size="small" secondary @click="openCreateModal">+ 添加伏笔</n-button>
-        <n-button size="small" type="primary" :loading="loading" @click="load">刷新</n-button>
-      </n-space>
+      <!-- 说明文字 -->
+      <p class="panel-lead">
+        <strong>写</strong>：人工埋设或章后 NLP 异步入库；<strong>读</strong>：供「本章建议」向量/启发式检索与上下文全局池，监控大盘统计回收率。
+      </p>
     </header>
 
     <div class="panel-tabs">
@@ -49,7 +49,7 @@
                 <n-input v-model:value="matchAnchors[idx].value" placeholder="关键词" style="flex:1" size="small" />
                 <n-button size="tiny" text @click="matchAnchors.splice(idx, 1)">✕</n-button>
               </n-space>
-              <n-button size="tiny" dashed secondary @click="matchAnchors.push({ key: '', value: '' })">+ 添加感官</n-button>
+              <n-button size="tiny" dashed @click="matchAnchors.push({ key: '', value: '' })">+ 添加感官</n-button>
 
               <template v-if="matchResult !== null">
                 <n-divider style="margin:4px 0" />
@@ -186,7 +186,7 @@
                 <n-input v-model:value="anchorRows[idx].value" placeholder="具体描述" style="flex:1" />
                 <n-button size="tiny" secondary @click="removeAnchor(idx)">✕</n-button>
               </n-space>
-              <n-button size="tiny" secondary dashed @click="addAnchor">+ 添加锚点</n-button>
+              <n-button size="tiny" dashed @click="addAnchor">+ 添加锚点</n-button>
             </n-space>
           </n-form-item>
         </n-space>
@@ -394,16 +394,7 @@ watch(foreshadowTick, () => {
   padding: 16px 20px 14px;
   border-bottom: 1px solid var(--aitext-split-border);
   background: var(--app-surface);
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-}
-
-.header-main {
-  flex: 1;
-  min-width: 0;
 }
 
 .title-row {
@@ -431,6 +422,10 @@ watch(foreshadowTick, () => {
 }
 
 .header-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
 }
 

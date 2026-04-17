@@ -1,14 +1,16 @@
 <template>
   <div class="hc-panel">
     <header class="hc-head">
-      <div>
+      <!-- 标题行：title + 按钮同行 -->
+      <div class="hc-title-row">
         <h3 class="hc-title">全息编年史</h3>
-        <p class="hc-lead">
-          中轴为章进度锚点：<strong>左</strong>里世界剧情时间，<strong>右</strong>表世界快照（存档）。
-          悬浮右侧快照节点时高亮本行左侧剧情；回滚将删除快照未包含的章节（不可撤销）。
-        </p>
+        <n-button size="small" type="primary" :loading="loading" @click="load">刷新</n-button>
       </div>
-      <n-button size="small" type="primary" :loading="loading" @click="load">刷新</n-button>
+      <!-- 说明文字 -->
+      <p class="hc-lead">
+        中轴为章进度锚点：<strong>左</strong>里世界剧情时间，<strong>右</strong>表世界快照（存档）。
+        悬浮右侧快照节点时高亮本行左侧剧情；回滚将删除快照未包含的章节（不可撤销）。
+      </p>
     </header>
 
     <n-alert v-if="noteText" type="default" :show-icon="true" class="hc-note" style="font-size: 11px">
@@ -199,16 +201,19 @@ watch(chroniclesTick, () => {
 }
 
 .hc-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
   margin-bottom: 14px;
   flex-shrink: 0;
 }
 
+.hc-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
 .hc-title {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 18px;
   font-weight: 700;
   background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
@@ -217,12 +222,15 @@ watch(chroniclesTick, () => {
   background-clip: text;
 }
 
+.hc-title-row .n-button {
+  margin-left: auto;
+}
+
 .hc-lead {
   margin: 0;
   font-size: 12px;
   line-height: 1.6;
   color: var(--n-text-color-3);
-  max-width: 540px;
 }
 
 .hc-note {

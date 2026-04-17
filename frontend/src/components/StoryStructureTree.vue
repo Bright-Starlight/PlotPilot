@@ -80,7 +80,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, h, onMounted, watch } from 'vue'
+import { ref, computed, h, onMounted, onUnmounted, watch } from 'vue'
 import { NTree, NEmpty, NSpin, NTag, NButton, NSpace, NDropdown, NModal, NInput, useMessage, useDialog } from 'naive-ui'
 import { structureApi, type StoryNode } from '@/api/structure'
 import { chapterApi } from '@/api/chapter'
@@ -99,6 +99,10 @@ const emit = defineEmits<{
 
 const message = useMessage()
 const dialog = useDialog()
+
+// 容器宽度响应式
+const containerWidth = ref(558)
+const isNarrow = computed(() => containerWidth.value < 436)
 
 const loading = ref(false)
 /** 全托管时空侧栏提示：避免与「启动结构规划」主按钮混淆 */
@@ -201,10 +205,20 @@ const convertToTreeNode = (node: StoryNode): any => {
     chapter: '📄',
   }
   const n = node.number
-  const displayName =
-    node.node_type === 'chapter' && typeof n === 'number' && n >= 1
-      ? `第${n}章 ${node.title || ''}`.trim()
-      : node.title
+  const isNarrow = containerWidth.value < 238
+  let displayName = node.title
+
+  if (node.node_type === 'chapter' && typeof n === 'number' && n >= 1) {
+    // 窄屏模式(<238px)章节只显示"第X章"
+    displayName = isNarrow ? `第${n}章` : `第${n}章 ${node.title || ''}`.trim()
+  } else if (isNarrow && node.node_type === 'act' && typeof n === 'number') {
+    // 窄屏模式(<238px)幕只显示"第X幕"
+    displayName = `第${n}幕`
+  } else if (isNarrow && node.node_type === 'part' && typeof n === 'number') {
+    // 窄屏模式(<238px)部只显示"第X部"
+    displayName = `第${n}部`
+  }
+
   return {
     key: node.id,
     label: displayName,
@@ -269,12 +283,23 @@ const loadTree = async () => {
     const hasData = treeData.value.length > 0
     emit('treeLoaded', hasData)
     await syncAutopilotEmptyHint(hasData)
+
+    // 初始化容器宽度
+    updateContainerWidth()
   } catch (e: any) {
     message.error(e?.response?.data?.detail || '加载结构失败')
     emit('treeLoaded', false)
     autopilotEmptyMode.value = null
   } finally {
     loading.value = false
+  }
+}
+
+// 更新容器宽度
+const updateContainerWidth = () => {
+  const el = document.querySelector('.story-structure')
+  if (el) {
+    containerWidth.value = el.clientWidth
   }
 }
 
@@ -403,13 +428,14 @@ const doAddChild = async () => {
   }
 }
 
-// 渲染节点标签
+// 渲染节点标签（带 tooltip 显示摘要）
 const renderLabel = ({ option }: { option: any }) => {
   const elements: any[] = [
     h('span', { class: 'node-icon' }, option.icon),
     h('span', { class: 'node-title' }, option.display_name),
   ]
-  if (option.node_type === 'chapter') {
+  // 窄屏模式下隐藏 "已收稿" 标签
+  if (option.node_type === 'chapter' && !isNarrow.value) {
     const st = (option as StoryNode & { status?: string }).status
     const hasContent =
       (option.word_count && option.word_count > 0) || st === 'completed'
@@ -422,24 +448,27 @@ const renderLabel = ({ option }: { option: any }) => {
       }, () => (hasContent ? '已收稿' : '未收稿'))
     )
   }
-  return h('span', { class: 'node-label' }, elements)
+  const node = option as StoryNode
+  const hasSummary = node.description && ['part', 'volume', 'act'].includes(node.node_type)
+  return h('span', {
+    class: 'node-label',
+    title: hasSummary ? node.description : undefined,
+  }, elements)
 }
 
-// 渲染节点后缀
+// 渲染节点后缀（仅显示章节范围/字数，摘要通过 tooltip 显示）
 const renderSuffix = ({ option }: { option: any }) => {
   const elements: any[] = []
   const node = option as StoryNode
-  if (node.description && ['part', 'volume', 'act'].includes(node.node_type)) {
-    elements.push(
-      h('span', {
-        class: 'node-description',
-        style: { color: '#999', fontSize: '12px', marginLeft: '8px' },
-      }, node.description)
-    )
+  // 窄屏模式下隐藏 "幕" 和 "章" 后面的统计信息
+  if (isNarrow.value && (node.node_type === 'act' || node.node_type === 'chapter')) {
+    return null
   }
+  // 章节节点显示字数
   if (node.node_type === 'chapter' && node.word_count) {
     elements.push(h('span', { class: 'node-range' }, `${node.word_count}字`))
   }
+  // 部/卷/幕显示章节范围
   if (node.chapter_start && node.chapter_end) {
     elements.push(
       h('span', { class: 'node-range' }, `${node.chapter_start}-${node.chapter_end}章 (${node.chapter_count})`)
@@ -457,7 +486,43 @@ const nodeProps = ({ option }: { option: any }) => {
   }
 }
 
-onMounted(() => { loadTree() })
+let resizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+  loadTree()
+  // 监听容器宽度变化
+  const el = document.querySelector('.story-structure')
+  if (el) {
+    resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        containerWidth.value = entry.contentRect.width
+      }
+    })
+    resizeObserver.observe(el)
+  }
+})
+
+// 监听宽度变化，窄屏模式切换时重新渲染树
+watch(containerWidth, (newWidth, oldWidth) => {
+  const crossedThreshold = (newWidth < 238 && oldWidth >= 238) || (newWidth >= 238 && oldWidth < 238)
+  if (crossedThreshold && treeData.value.length > 0) {
+    // 重新转换树节点以更新显示名称
+    const refreshTree = (nodes: StoryNode[]): any[] => nodes.map(node => ({
+      ...convertToTreeNode(node),
+      children: node.children ? refreshTree(node.children) : []
+    }))
+    // 从原始数据重新转换
+    const originalNodes = treeData.value.map(n => ({ ...n, children: n.children }))
+    treeData.value = refreshTree(originalNodes)
+  }
+})
+
+onUnmounted(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+})
 
 defineExpose({ loadTree })
 </script>
@@ -484,17 +549,25 @@ defineExpose({ loadTree })
 .node-label {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
-.node-icon { font-size: 16px; }
-.node-title { font-size: 13px; }
+.node-icon { font-size: 16px; width: 18px; text-align: center; }
+.node-title { font-size: 14px; }
 .node-range {
-  font-size: 12px;
+  font-size: 11px;
   color: #999;
-  margin-left: 8px;
+  margin-left: 6px;
 }
 .node-level-1 { font-weight: 600; }
 .node-level-2 { font-weight: 500; }
 .node-level-3 { font-weight: normal; }
 .node-level-4 { font-weight: normal; font-size: 13px; }
+
+/* 紧凑布局 */
+:deep(.n-tree-node-content) {
+  padding: 2px 0;
+}
+:deep(.n-tree-node-wrapper) {
+  padding: 1px 0;
+}
 </style>

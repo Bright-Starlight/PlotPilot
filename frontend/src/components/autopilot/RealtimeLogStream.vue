@@ -520,7 +520,21 @@ onUnmounted(() => {
 
 <style scoped>
 .realtime-log-stream {
+  height: 100%;
+  min-width: 368px;
   position: relative;
+}
+
+/* 确保卡片高度填满容器 */
+:deep(.n-card) {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+:deep(.n-card__content) {
+  flex: 1;
+  min-height: 0;
 }
 
 .stream-wrap {
@@ -700,7 +714,8 @@ onUnmounted(() => {
 
 /* 日志流主体 */
 .stream-body {
-  height: 280px;
+  height: 200px; /* 固定高度，与张力心电图一致 */
+  max-height: 200px;
   overflow-y: auto;
   padding: 12px 16px;
   scroll-behavior: smooth;

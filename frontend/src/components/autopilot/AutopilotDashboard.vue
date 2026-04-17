@@ -1,10 +1,5 @@
 <template>
   <div class="autopilot-dashboard">
-    <n-alert type="default" :show-icon="false" class="monitor-copy-hint">
-      <n-text depth="3" style="font-size: 12px; line-height: 1.5">
-        <strong>监控说明</strong>：「文风」卡片为按<strong>角色声线</strong>的偏离监测。全书<strong>作者文风指纹</strong>与侧栏「剧本基建」规划为不同能力，与此处互补。
-      </n-text>
-    </n-alert>
     <!-- 监控网格 -->
     <div class="monitor-grid">
       <!-- 第一行：张力图表 + 实时日志 -->
@@ -74,8 +69,7 @@ function handleBreakerReset() {
 
 <style scoped>
 .autopilot-dashboard {
-  height: 100%;
-  overflow-y: auto;
+  /* 高度由内容自然撑开，配合 WorkArea 整体滚动 */
 }
 
 .monitor-copy-hint {
@@ -86,12 +80,27 @@ function handleBreakerReset() {
 .monitor-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: minmax(200px, auto); /* 第一行最小200px，自动拉伸 */
+  align-items: stretch; /* 单元格垂直拉伸对齐 */
   gap: 16px;
-  padding: 4px;
+  padding: 8px;
 }
 
 .grid-cell {
-  min-height: 280px;
+  min-height: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.grid-cell > * {
+  flex: 1 1 auto; /* 允许子元素拉伸填充 */
+  min-height: 0;
+}
+
+/* 第一行单元格高度一致 */
+.grid-cell.span-1,
+.grid-cell.span-2 {
+  height: 100%;
 }
 
 .grid-cell.span-1 {
