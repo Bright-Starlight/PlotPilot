@@ -88,11 +88,11 @@ class BudgetAllocation:
         
         # 追加强制收束指令
         if self.expired_foreshadows:
-            parts.append("\n=== 🚨强制剧情收束令🚨 ===\n" + 
-                         "以下伏笔已超出预期揭晓章节，必须在本章或本节拍的行文中，通过回忆、对话、意外发展或直接揭露等方式去解答或明显推进悬念：\n" + 
-                         "\n".join(f"- {f}" for f in self.expired_foreshadows) + 
+            parts.append("\n=== 🚨强制剧情收束令🚨 ===\n" +
+                         "以下伏笔已超出预期揭晓章节，必须在本章或本节拍的行文中，通过回忆、对话、意外发展或直接揭露等方式去解答或明显推进悬念：\n" +
+                         "\n".join(f"- {f}" for f in self.expired_foreshadows) +
                          "\n【如果你无视此指令，长篇小说的情节网将陷入崩溃】")
-        
+
         return "\n".join(parts)
 
 
@@ -226,7 +226,7 @@ class ContextBudgetAllocator:
                 if "🔴已过期" in line:
                     desc = line.split(":", 1)[-1].strip() if ":" in line else line.strip()
                     allocation.expired_foreshadows.append(desc)
-        
+
         # ========== 第二步：计算 T0 强制保留量 ==========
         t0_slots = {name: slot for name, slot in slots.items() if slot.tier == PriorityTier.T0_CRITICAL}
         t0_total = sum(slot.tokens for slot in t0_slots.values())

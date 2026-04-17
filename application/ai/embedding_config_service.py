@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingConfigModel(BaseModel):
     """嵌入配置数据模型。"""
+
     model_config = {"protected_namespaces": ()}
     id: str = "default"
     mode: str = "local"  # local | openai
@@ -92,6 +93,7 @@ class EmbeddingConfigService:
             pass
         from infrastructure.persistence.database.connection import DatabaseConnection
         from application.paths import DATA_DIR
+
         db_path = str(DATA_DIR / "aitext.db")
         return DatabaseConnection(db_path)
 
@@ -128,21 +130,24 @@ class EmbeddingConfigService:
             return
         now = datetime.now().isoformat()
         defaults = self._default_values()
-        db.execute("""
+        db.execute(
+            """
             INSERT OR IGNORE INTO embedding_config
             (id, mode, api_key, base_url, model, use_gpu, model_path, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            defaults["id"],
-            defaults["mode"],
-            defaults["api_key"],
-            defaults["base_url"],
-            defaults["model"],
-            defaults["use_gpu"],
-            defaults["model_path"],
-            now,
-            now,
-        ))
+            """,
+            (
+                defaults["id"],
+                defaults["mode"],
+                defaults["api_key"],
+                defaults["base_url"],
+                defaults["model"],
+                defaults["use_gpu"],
+                defaults["model_path"],
+                now,
+                now,
+            ),
+        )
         self._commit_db(db)
         logger.info("EmbeddingConfigService: 已初始化默认嵌入配置")
 
@@ -205,7 +210,6 @@ class EmbeddingConfigService:
 
 
 # ── 单例 ──────────────────────────────────────────────
-
 _service_instance: Optional[EmbeddingConfigService] = None
 
 

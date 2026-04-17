@@ -371,6 +371,7 @@ import { useMessage, NIcon } from 'naive-ui'
 import { novelApi, type NovelDTO } from '../api/novel'
 import StatsSidebar from '@/components/stats/StatsSidebar.vue'
 import NovelSetupGuide from '@/components/onboarding/NovelSetupGuide.vue'
+import LLMSettingsModal from '@/components/LLMSettingsModal.vue'
 import { useStatsStore } from '@/stores/statsStore'
 
 const LLMSettingsModal = defineAsyncComponent(() => import('@/components/LLMSettingsModal.vue'))

@@ -142,6 +142,8 @@ import { defineAsyncComponent, ref, computed, onMounted, onUnmounted } from 'vue
 import { storeToRefs } from 'pinia'
 import StatCard from './StatCard.vue'
 import { useStatsStore } from '@/stores/statsStore'
+import GlobalLLMEntryButton from '@/components/global/GlobalLLMEntryButton.vue'
+import PromptPlazaEntryButton from '@/components/global/PromptPlazaEntryButton.vue'
 
 const GlobalLLMEntryButton = defineAsyncComponent(() => import('@/components/global/GlobalLLMEntryButton.vue'))
 const PromptPlazaEntryButton = defineAsyncComponent(() => import('@/components/global/PromptPlazaEntryButton.vue'))
