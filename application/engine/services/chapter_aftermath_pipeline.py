@@ -99,10 +99,14 @@ class ChapterAftermathPipeline:
         *,
         run_quality_gate: bool = False,
         quality_gate_mode: str = "full",
+        use_fusion_draft: bool = False,
     ) -> Dict[str, Any]:
         """保存正文后执行完整管线。返回文风结果供托管/审计门控使用。
 
         三元组与伏笔、故事线、张力、对话已在 narrative_sync 单次 LLM 中落库。
+
+        Args:
+            use_fusion_draft: 如果为 True，使用融合草稿文本而非正文进行信息同步
         """
         out: Dict[str, Any] = {
             "drift_alert": False,
@@ -132,6 +136,18 @@ class ChapterAftermathPipeline:
                     gate_result.get("quality_gate_reason", "quality gate failed"),
                 )
                 return out
+
+            # 门禁通过后，如果有融合草稿，使用融合草稿文本
+            if use_fusion_draft and self._chapter_fusion_service is not None:
+                chapter = self._resolve_chapter(novel_id, chapter_number)
+                if chapter:
+                    draft = self._chapter_fusion_service.fusion_repository.get_latest_draft_for_chapter(chapter.id)
+                    if draft and draft.text:
+                        content = draft.text
+                        logger.info(
+                            "使用融合草稿文本进行信息同步 novel=%s ch=%s fusion_id=%s",
+                            novel_id, chapter_number, draft.fusion_id
+                        )
 
         # 1) 叙事 + 向量 + 故事线 + 张力 + 对话（与 chapter_narrative_sync 一致）
         try:

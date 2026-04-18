@@ -168,22 +168,17 @@ async def test_handle_auditing_retries_quality_gate_before_stopping():
         Mock(number=1, status=Mock(value="completed"), id="chapter-1", content="旧正文"),
     ]
     aftermath_pipeline = Mock()
-    aftermath_pipeline.run_after_chapter_saved = AsyncMock(side_effect=[
+    # 首次质量门禁失败
+    aftermath_pipeline._run_quality_gate = AsyncMock(side_effect=[
         {
-            "drift_alert": False,
-            "similarity_score": 0.9,
-            "narrative_sync_ok": False,
             "quality_gate_passed": False,
+            "quality_gate_mode": "full",
+            "quality_gate_step": "validation",
+            "quality_gate_reason": "Validation 有阻断问题",
+            "quality_gate_blockers": ["Validation 有阻断问题"],
         },
+        # 重试成功
         {
-            "drift_alert": False,
-            "similarity_score": 0.92,
-            "narrative_sync_ok": True,
-            "quality_gate_passed": True,
-        },
-    ])
-    aftermath_pipeline._run_quality_gate = AsyncMock(
-        return_value={
             "quality_gate_passed": True,
             "quality_gate_mode": "retry",
             "quality_gate_step": "pass",
@@ -193,6 +188,15 @@ async def test_handle_auditing_retries_quality_gate_before_stopping():
             "fusion_id": "fd-1",
             "validation_report_id": "vr-1",
             "validation_status": "completed",
+        }
+    ])
+    # 门禁通过后执行信息同步
+    aftermath_pipeline.run_after_chapter_saved = AsyncMock(
+        return_value={
+            "drift_alert": False,
+            "similarity_score": 0.92,
+            "narrative_sync_ok": True,
+            "quality_gate_passed": True,
         }
     )
 
@@ -218,8 +222,9 @@ async def test_handle_auditing_retries_quality_gate_before_stopping():
 
     await daemon._handle_auditing(novel)
 
-    assert aftermath_pipeline.run_after_chapter_saved.await_count == 2
-    aftermath_pipeline._run_quality_gate.assert_awaited_once()
+    # 验证：质量门禁调用 2 次（首次 + 重试），信息同步调用 1 次
+    assert aftermath_pipeline._run_quality_gate.await_count == 2
+    aftermath_pipeline.run_after_chapter_saved.assert_awaited_once()
     daemon._auto_trigger_macro_diagnosis.assert_awaited_once()
     daemon._maybe_generate_summaries.assert_awaited_once()
     assert novel.autopilot_status == AutopilotStatus.RUNNING
@@ -234,16 +239,16 @@ async def test_handle_auditing_stops_when_quality_gate_retry_fails():
         Mock(number=1, status=Mock(value="completed"), id="chapter-1", content="旧正文"),
     ]
     aftermath_pipeline = Mock()
-    aftermath_pipeline.run_after_chapter_saved = AsyncMock(
-        return_value={
-            "drift_alert": False,
-            "similarity_score": 0.9,
-            "narrative_sync_ok": False,
+    # 首次质量门禁失败，重试也失败
+    aftermath_pipeline._run_quality_gate = AsyncMock(side_effect=[
+        {
             "quality_gate_passed": False,
-        }
-    )
-    aftermath_pipeline._run_quality_gate = AsyncMock(
-        return_value={
+            "quality_gate_mode": "full",
+            "quality_gate_step": "validation",
+            "quality_gate_reason": "Validation 有阻断问题",
+            "quality_gate_blockers": ["Validation 有阻断问题"],
+        },
+        {
             "quality_gate_passed": False,
             "quality_gate_mode": "retry",
             "quality_gate_step": "validation",
@@ -254,7 +259,9 @@ async def test_handle_auditing_stops_when_quality_gate_retry_fails():
             "validation_report_id": "vr-1",
             "validation_status": "failed",
         }
-    )
+    ])
+    # 不应该调用信息同步
+    aftermath_pipeline.run_after_chapter_saved = AsyncMock()
 
     daemon = AutopilotDaemon(
         novel_repository=Mock(),
@@ -278,8 +285,9 @@ async def test_handle_auditing_stops_when_quality_gate_retry_fails():
 
     await daemon._handle_auditing(novel)
 
-    aftermath_pipeline.run_after_chapter_saved.assert_awaited_once()
-    aftermath_pipeline._run_quality_gate.assert_awaited_once()
+    # 验证：质量门禁调用 2 次（首次 + 重试），信息同步不应该被调用
+    assert aftermath_pipeline._run_quality_gate.await_count == 2
+    aftermath_pipeline.run_after_chapter_saved.assert_not_awaited()
     daemon._auto_trigger_macro_diagnosis.assert_not_awaited()
     daemon._maybe_generate_summaries.assert_not_awaited()
     assert novel.autopilot_status == AutopilotStatus.STOPPED

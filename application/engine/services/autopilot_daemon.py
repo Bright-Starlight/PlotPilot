@@ -1591,22 +1591,21 @@ class AutopilotDaemon:
                     existing_metrics,
                 )
 
-        # 2. 统一章后管线：叙事/向量、文风（一次）、KG 推断；三元组与伏笔在叙事同步单次 LLM 中落库
+        # 2. 统一章后管线：先执行质量门禁，通过后使用融合草稿进行信息同步
         # 注意：张力评分已在 aftermath_pipeline 的 sync_chapter_narrative_after_save 中完成，无需重复
         if self.aftermath_pipeline:
             try:
-                drift_result = await self.aftermath_pipeline.run_after_chapter_saved(
+                # 首次只执行质量门禁，不执行信息同步
+                drift_result = await self.aftermath_pipeline._run_quality_gate(
                     novel.novel_id.value,
                     chapter_num,
                     content,
-                    run_quality_gate=True,
-                )
-                logger.info(
-                    f"[{novel.novel_id}] 章后管线完成: 相似度={drift_result.get('similarity_score')}, "
-                    f"drift_alert={drift_result.get('drift_alert')}"
+                    quality_gate_mode="full",
                 )
 
                 quality_gate_passed = bool(drift_result.get("quality_gate_passed", True))
+
+                # 如果门禁失败，重试
                 if not quality_gate_passed:
                     logger.warning(
                         f"[{novel.novel_id}] 章节 {chapter_num} 审计门禁未通过，开始重试（跳过 State Locks）"
@@ -1618,32 +1617,53 @@ class AutopilotDaemon:
                         quality_gate_mode="retry",
                     )
                     drift_result.update(retry_result)
-                    if not retry_result.get("quality_gate_passed", True):
+                    quality_gate_passed = bool(retry_result.get("quality_gate_passed", True))
+
+                    if not quality_gate_passed:
                         logger.warning(
                             f"[{novel.novel_id}] 章节 {chapter_num} 审计重试仍未通过，退出自动驾驶"
                         )
                         novel.last_audit_chapter_number = chapter_num
                         novel.last_audit_similarity = drift_result.get("similarity_score")
                         novel.last_audit_drift_alert = bool(drift_result.get("drift_alert", False))
-                        novel.last_audit_narrative_ok = bool(drift_result.get("narrative_sync_ok", True))
+                        novel.last_audit_narrative_ok = False  # 门禁失败，未执行信息同步
                         novel.last_audit_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                         novel.autopilot_status = AutopilotStatus.STOPPED
                         novel.current_stage = NovelStage.AUDITING
                         self._save_novel_state(novel)
                         return
 
-                    logger.info(
-                        f"[{novel.novel_id}] 章节 {chapter_num} 审计重试通过，执行信息同步"
-                    )
-                    drift_result = await self.aftermath_pipeline.run_after_chapter_saved(
-                        novel.novel_id.value,
-                        chapter_num,
-                        content,
-                    )
-                    logger.info(
-                        f"[{novel.novel_id}] 重试后章后管线完成: 相似度={drift_result.get('similarity_score')}, "
-                        f"drift_alert={drift_result.get('drift_alert')}"
-                    )
+                # 门禁通过后，执行完整信息同步（使用融合草稿）
+                logger.info(
+                    f"[{novel.novel_id}] 章节 {chapter_num} 审计通过，执行信息同步（使用融合草稿）"
+                )
+
+                # 获取融合草稿并替换章节正文
+                fusion_draft_text = None
+                if self.aftermath_pipeline._chapter_fusion_service is not None:
+                    chapter_entity = self.aftermath_pipeline._resolve_chapter(novel.novel_id.value, chapter_num)
+                    if chapter_entity:
+                        draft = self.aftermath_pipeline._chapter_fusion_service.fusion_repository.get_latest_draft_for_chapter(chapter_entity.id)
+                        if draft and draft.text:
+                            fusion_draft_text = draft.text
+                            # 将融合草稿写回章节实体
+                            chapter_entity.update_content(fusion_draft_text)
+                            self.chapter_repository.save(chapter_entity)
+                            logger.info(
+                                f"[{novel.novel_id}] 章节 {chapter_num} 正文已替换为融合草稿 fusion_id={draft.fusion_id}"
+                            )
+
+                drift_result = await self.aftermath_pipeline.run_after_chapter_saved(
+                    novel.novel_id.value,
+                    chapter_num,
+                    content,
+                    run_quality_gate=False,  # 不再执行质量门禁
+                    use_fusion_draft=True,   # 使用融合草稿
+                )
+                logger.info(
+                    f"[{novel.novel_id}] 信息同步完成: 相似度={drift_result.get('similarity_score')}, "
+                    f"drift_alert={drift_result.get('drift_alert')}"
+                )
 
                 # 从已保存的 chapter 中读取张力值，更新 novel.last_chapter_tension
                 try:
