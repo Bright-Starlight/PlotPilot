@@ -82,6 +82,15 @@ class PublishGateResponse(ValidationReportDetailResponse):
     blocking_issues: List[ValidationIssueResponse] = Field(default_factory=list)
 
 
+class ManualPublishResponse(BaseModel):
+    chapter_id: str
+    fusion_id: str
+    plan_version: int
+    state_lock_version: int
+    text_length: int
+    published: bool
+
+
 def _summary_response(report) -> ValidationReportSummaryResponse:
     return ValidationReportSummaryResponse(
         report_id=report.report_id,
@@ -269,5 +278,31 @@ async def check_publish_gate(
             ],
             **_detail_response(report).model_dump(),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/chapters/{chapter_id}/manual-publish", response_model=ManualPublishResponse)
+async def manual_publish_fusion_draft(
+    chapter_id: str,
+    service: ValidationService = Depends(get_validation_service),
+):
+    """手动发布融合草稿到章节正文。
+
+    用于 Validation 阶段 LLM 误判时，人工审阅后手动触发发布。
+    将最新的融合草稿内容写入章节正文，与自动发布流程相同。
+
+    Args:
+        chapter_id: 章节 ID
+
+    Returns:
+        ManualPublishResponse: 包含发布结果的响应
+
+    Raises:
+        HTTPException: 400 - 章节不存在或没有融合草稿
+    """
+    try:
+        result = service.manual_publish_fusion_draft(chapter_id)
+        return ManualPublishResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

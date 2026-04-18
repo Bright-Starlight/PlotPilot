@@ -350,6 +350,56 @@ class ValidationService:
         )
         return (len(blocking_issues) == 0, latest_report, blocking_issues)
 
+    def manual_publish_fusion_draft(self, chapter_id: str) -> dict:
+        """手动发布融合草稿到章节正文。
+
+        用于 Validation 阶段 LLM 误判时，人工审阅后手动触发发布。
+        执行与自动发布相同的逻辑：获取融合草稿并替换章节正文。
+
+        Args:
+            chapter_id: 章节 ID
+
+        Returns:
+            包含发布结果的字典
+
+        Raises:
+            ValueError: 如果章节不存在或没有融合草稿
+        """
+        logger.info("manual publish requested chapter_id=%s", chapter_id)
+
+        # 获取章节实体
+        chapter = self.chapter_repository.get_by_id(ChapterId(chapter_id))
+        if chapter is None:
+            raise ValueError("Chapter not found")
+
+        # 获取最新融合草稿
+        draft = self.fusion_repository.get_latest_draft_for_chapter(chapter_id)
+        if draft is None:
+            raise ValueError("No fusion draft is available for manual publish")
+
+        if not draft.text:
+            raise ValueError("Fusion draft text is empty")
+
+        # 将融合草稿写回章节实体
+        chapter.update_content(draft.text)
+        self.chapter_repository.save(chapter)
+
+        logger.info(
+            "manual publish completed chapter_id=%s fusion_id=%s text_length=%s",
+            chapter_id,
+            draft.fusion_id,
+            len(draft.text),
+        )
+
+        return {
+            "chapter_id": chapter_id,
+            "fusion_id": draft.fusion_id,
+            "plan_version": draft.plan_version,
+            "state_lock_version": draft.state_lock_version,
+            "text_length": len(draft.text),
+            "published": True,
+        }
+
     def _load_draft_context(
         self,
         chapter_id: str,
