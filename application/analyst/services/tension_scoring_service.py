@@ -99,7 +99,7 @@ class TensionScoringService:
             user=f"第 {chapter_number} 章正文如下：\n\n{body}",
         )
         config = GenerationConfig(
-            max_tokens=512,
+            max_tokens=1024,
             temperature=0.3,
             response_format=tension_scoring_response_format(),
         )

@@ -97,7 +97,7 @@ def tension_scoring_response_format() -> Dict[str, Any]:
     用法::
 
         config = GenerationConfig(
-            max_tokens=512,
+            max_tokens=1024,
             temperature=0.3,
             response_format=tension_scoring_response_format(),
         )

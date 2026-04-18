@@ -39,6 +39,9 @@ def _is_retryable_llm_error(exc: Exception) -> bool:
         "temporar",
         "connection reset",
         "service unavailable",
+        "no extractable text",
+        "api returned no text",
+        "api returned empty",
     )
     retryable_statuses = (" 429", " 500", " 502", " 503", " 504", " 529")
     return any(marker in message for marker in retryable_markers) or any(
