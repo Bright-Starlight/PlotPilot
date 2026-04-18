@@ -338,6 +338,14 @@ class AutopilotDaemon:
                 logger.info(f"[{novel.novel_id}] ✍️  开始写作 (第 {novel.current_act + 1} 幕)")
                 await self._handle_writing(novel)
             elif novel.current_stage == NovelStage.AUDITING:
+                chapters = self.chapter_repository.list_by_novel(NovelId(novel.novel_id.value))
+                chapter = self._get_latest_completed_chapter(chapters)
+                if chapter and self._should_skip_duplicate_audit(novel, chapter):
+                    logger.info(
+                        f"[{novel.novel_id}] 🔍 审计已处理 chapter={chapter.number} "
+                        f"updated_at={getattr(chapter, 'updated_at', None)} last_audit_at={novel.last_audit_at}，跳过重复触发"
+                    )
+                    return
                 logger.info(f"[{novel.novel_id}] 🔍 开始审计")
                 await self._handle_auditing(novel)
             elif novel.current_stage == NovelStage.PAUSED_FOR_REVIEW:
@@ -1541,6 +1549,13 @@ class AutopilotDaemon:
             return
         chapter_num = chapter.number
 
+        if self._should_skip_duplicate_audit(novel, chapter):
+            logger.info(
+                f"[{novel.novel_id}] 章节 {chapter_num} 已完成审计，"
+                f"last_audit_at={novel.last_audit_at} chapter_updated_at={getattr(chapter, 'updated_at', None)}，跳过"
+            )
+            return
+
         content = chapter.content or ""
         chapter_id = ChapterId(chapter.id)
 
@@ -1743,6 +1758,33 @@ class AutopilotDaemon:
         if self.aftermath_pipeline and getattr(self.aftermath_pipeline, "_voice", None):
             return getattr(self.aftermath_pipeline, "_voice")
         return self.voice_drift_service
+
+    @staticmethod
+    def _normalize_audit_timestamp(value: Any) -> Optional[datetime]:
+        """将审计时间或章节更新时间统一归一到 naive UTC，便于比较。"""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+
+    def _should_skip_duplicate_audit(self, novel: Novel, chapter) -> bool:
+        """同一章节、同一内容已经审计过时，避免重复触发 full audit。"""
+        if getattr(novel, "last_audit_chapter_number", None) != getattr(chapter, "number", None):
+            return False
+
+        last_audit_at = self._normalize_audit_timestamp(getattr(novel, "last_audit_at", None))
+        chapter_updated_at = self._normalize_audit_timestamp(getattr(chapter, "updated_at", None))
+        if last_audit_at is None or chapter_updated_at is None:
+            return False
+        return chapter_updated_at <= last_audit_at
 
     def _similarity_below_warning_threshold(self, similarity_score: Any) -> bool:
         """展示告警阈值：宽松，用于提示。"""

@@ -99,3 +99,22 @@ async def get_fusion_job(
         fusion_draft=FusionDraftResponse(**draft.__dict__) if draft else None,
         preview=job.preview,
     )
+
+
+@router.get("/chapters/{chapter_id}/fusion-jobs/latest", response_model=FusionJobResponse)
+async def get_latest_fusion_job_for_chapter(
+    chapter_id: str = Path(..., description="章节 ID"),
+    service: ChapterFusionService = Depends(get_chapter_fusion_service),
+):
+    job = service.get_latest_job_for_chapter(chapter_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Fusion job not found for chapter: {chapter_id}")
+    draft = job.fusion_draft
+    return FusionJobResponse(
+        fusion_job_id=job.fusion_job_id,
+        chapter_id=job.chapter_id,
+        status=job.status,
+        error_message=job.error_message,
+        fusion_draft=FusionDraftResponse(**draft.__dict__) if draft else None,
+        preview=job.preview,
+    )

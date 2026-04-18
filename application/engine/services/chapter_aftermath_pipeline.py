@@ -18,6 +18,7 @@ from typing import Any, Dict, TYPE_CHECKING
 from domain.ai.services.llm_service import LLMService
 
 if TYPE_CHECKING:
+    from application.blueprint.services.beat_sheet_service import BeatSheetService
     from application.world.services.knowledge_service import KnowledgeService
     from application.core.services.chapter_fusion_service import ChapterFusionService
     from application.core.services.state_lock_service import StateLockService
@@ -73,6 +74,7 @@ class ChapterAftermathPipeline:
         novel_repository: Any = None,
         state_lock_service: "StateLockService | None" = None,
         chapter_fusion_service: "ChapterFusionService | None" = None,
+        beat_sheet_service: "BeatSheetService | None" = None,
     ) -> None:
         self._knowledge = knowledge_service
         self._indexing = chapter_indexing_service
@@ -87,6 +89,7 @@ class ChapterAftermathPipeline:
         self._novel_repository = novel_repository
         self._state_lock_service = state_lock_service
         self._chapter_fusion_service = chapter_fusion_service
+        self._beat_sheet_service = beat_sheet_service
 
     async def run_after_chapter_saved(
         self,
@@ -298,6 +301,38 @@ class ChapterAftermathPipeline:
             try:
                 beat_sheet_repo = getattr(self._chapter_fusion_service, "beat_sheet_repository", None)
                 beat_sheet = await beat_sheet_repo.get_by_chapter_id(chapter.id) if beat_sheet_repo else None
+                state_lock_version = int(result.get("state_lock_version") or 0)
+                plan_version = int(result.get("plan_version") or 0)
+                stored_state_lock_version = int(getattr(beat_sheet, "state_lock_version", 0) or 0) if beat_sheet else 0
+                stored_plan_version = int(getattr(beat_sheet, "plan_version", 0) or 0) if beat_sheet else 0
+                needs_refresh = (
+                    beat_sheet is None
+                    or not getattr(beat_sheet, "scenes", None)
+                    or stored_state_lock_version != state_lock_version
+                    or stored_plan_version != plan_version
+                )
+
+                if needs_refresh:
+                    if self._beat_sheet_service is None:
+                        raise ValueError("Beat sheet service is unavailable to refresh stale beat sheet")
+                    outline_text = str(getattr(chapter, "outline", "") or getattr(chapter, "content", "") or "").strip()
+                    if not outline_text:
+                        raise ValueError("Chapter outline is required before beat sheet generation")
+                    logger.info(
+                        "quality gate beat sheet refresh novel=%s ch=%s plan_version=%s state_lock_version=%s stale=%s",
+                        novel_id,
+                        chapter_number,
+                        plan_version,
+                        state_lock_version,
+                        stored_state_lock_version != state_lock_version or stored_plan_version != plan_version,
+                    )
+                    beat_sheet = await self._beat_sheet_service.generate_beat_sheet(
+                        chapter_id=chapter.id,
+                        outline=outline_text,
+                        plan_version=plan_version or None,
+                        state_lock_version=state_lock_version,
+                    )
+
                 if beat_sheet is None or not getattr(beat_sheet, "scenes", None):
                     raise ValueError("Beat sheet not found")
 

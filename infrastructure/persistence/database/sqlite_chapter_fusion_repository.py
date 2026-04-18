@@ -163,21 +163,22 @@ class SqliteChapterFusionRepository:
         )
         if not row:
             return None
-        draft = self.get_draft_by_job(fusion_job_id)
-        return FusionJobDTO(
-            fusion_job_id=row["fusion_job_id"],
-            chapter_id=row["chapter_id"],
-            plan_version=int(row["plan_version"] or 0),
-            state_lock_version=int(row["state_lock_version"] or 0),
-            beat_ids=json.loads(row.get("beat_ids_json") or "[]"),
-            target_words=int(row.get("target_words") or 0),
-            suspense_budget=FusionSuspenseBudgetDTO.from_dict(json.loads(row.get("suspense_budget_json") or "{}")),
-            status=row.get("status") or "queued",
-            error_message=row.get("error_message") or "",
-            fusion_draft=draft,
-            created_at=self._parse_dt(row.get("created_at")),
-            updated_at=self._parse_dt(row.get("updated_at")),
+        return self._row_to_job(row)
+
+    def get_latest_job_for_chapter(self, chapter_id: str) -> Optional[FusionJobDTO]:
+        row = self.db.fetch_one(
+            """
+            SELECT *
+            FROM fusion_jobs
+            WHERE chapter_id = ?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (chapter_id,),
         )
+        if not row:
+            return None
+        return self._row_to_job(row)
 
     def get_draft_by_job(self, fusion_job_id: str) -> Optional[FusionDraftDTO]:
         row = self.db.fetch_one(
@@ -212,6 +213,23 @@ class SqliteChapterFusionRepository:
             warnings=json.loads(row.get("warnings_json") or "[]"),
             state_lock_violations=json.loads(row.get("state_lock_violations_json") or "[]"),
             latest_validation_report_id=(latest_validation or {}).get("report_id", ""),
+        )
+
+    def _row_to_job(self, row: Dict[str, Any]) -> FusionJobDTO:
+        draft = self.get_draft_by_job(row["fusion_job_id"])
+        return FusionJobDTO(
+            fusion_job_id=row["fusion_job_id"],
+            chapter_id=row["chapter_id"],
+            plan_version=int(row["plan_version"] or 0),
+            state_lock_version=int(row["state_lock_version"] or 0),
+            beat_ids=json.loads(row.get("beat_ids_json") or "[]"),
+            target_words=int(row.get("target_words") or 0),
+            suspense_budget=FusionSuspenseBudgetDTO.from_dict(json.loads(row.get("suspense_budget_json") or "{}")),
+            status=row.get("status") or "queued",
+            error_message=row.get("error_message") or "",
+            fusion_draft=draft,
+            created_at=self._parse_dt(row.get("created_at")),
+            updated_at=self._parse_dt(row.get("updated_at")),
         )
 
     def get_draft(self, fusion_id: str) -> Optional[FusionDraftDTO]:

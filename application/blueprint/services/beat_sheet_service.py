@@ -61,16 +61,15 @@ class BeatSheetService:
             chapter_id: 章节 ID
             outline: 章节大纲
             plan_version: 规划版本（可选）
-            state_lock_version: 状态锁版本（可选，默认为 1）
+            state_lock_version: 状态锁版本（必填）
 
         Returns:
             生成的节拍表
         """
         logger.info(f"Generating beat sheet for chapter {chapter_id} with state_lock_version={state_lock_version}")
-        # state_lock_version 为可选，没有时使用默认值 1
-        effective_state_lock_version = state_lock_version if state_lock_version is not None and state_lock_version > 0 else 1
         if state_lock_version is None or state_lock_version <= 0:
-            logger.warning(f"[BeatSheet] state_lock_version is missing or invalid ({state_lock_version}), using default 1")
+            raise ValueError("state_lock_version is required before beat sheet generation")
+        effective_state_lock_version = state_lock_version
 
         # 1. 混合检索：获取相关上下文
         context = await self._retrieve_relevant_context(chapter_id, outline)

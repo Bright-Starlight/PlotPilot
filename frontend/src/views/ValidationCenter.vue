@@ -38,6 +38,28 @@
         {{ errorMessage }}
       </n-alert>
 
+      <n-card v-if="latestReport" size="small" :bordered="true">
+        <template #header>
+          <n-space align="center" justify="space-between" style="width: 100%">
+            <span>最新校验报告</span>
+            <n-text depth="3">{{ chapterLabel(latestReport.chapter_id) }}</n-text>
+          </n-space>
+        </template>
+        <n-space :size="8" wrap>
+          <n-tag size="small" round :type="latestReport.passed ? 'success' : 'error'">
+            {{ latestReport.passed ? '校验通过' : '存在阻断问题' }}
+          </n-tag>
+          <n-tag size="small" round>报告 {{ latestReport.report_id }}</n-tag>
+          <n-tag size="small" round>草稿 {{ latestReport.draft_id }}</n-tag>
+          <n-tag size="small" round>类型 {{ latestReport.draft_type }}</n-tag>
+          <n-tag size="small" round>State Lock v{{ latestReport.state_lock_version }}</n-tag>
+          <n-tag size="small" round>P0 {{ latestReport.p0_count }}</n-tag>
+          <n-tag size="small" round>P1 {{ latestReport.p1_count }}</n-tag>
+          <n-tag size="small" round>P2 {{ latestReport.p2_count }}</n-tag>
+          <n-tag size="small" round>Token {{ latestReport.token_usage.total_tokens }}</n-tag>
+        </n-space>
+      </n-card>
+
       <n-card size="small" :bordered="true">
         <template #header>
           <n-space align="center" justify="space-between" style="width: 100%">
@@ -133,7 +155,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { chapterApi } from '../api/chapter'
-import { validationReportsApi, type ValidationIssueDTO } from '../api/validationReports'
+import { validationReportsApi, type ValidationIssueDTO, type ValidationReportDetailDTO } from '../api/validationReports'
 
 const route = useRoute()
 const router = useRouter()
@@ -143,6 +165,7 @@ const slug = route.params.slug as string
 const loading = ref(false)
 const actionLoading = ref(false)
 const errorMessage = ref('')
+const latestReport = ref<ValidationReportDetailDTO | null>(null)
 const issues = ref<ValidationIssueDTO[]>([])
 const chapters = ref<Array<{ id: string; number: number; title: string }>>([])
 const chapterFilter = ref<string | null>(null)
@@ -177,6 +200,12 @@ function goBack() {
   router.push(`/book/${slug}/workbench`)
 }
 
+function parseQueryValue(value: unknown): string | null {
+  if (value == null || value === '') return null
+  const raw = Array.isArray(value) ? value[0] : value
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+}
+
 function openChapter(chapterId: string) {
   const chapter = chapters.value.find(item => item.id === chapterId)
   if (!chapter) return
@@ -209,6 +238,29 @@ async function loadIssues() {
   } finally {
     loading.value = false
   }
+}
+
+async function loadLatestReport(chapterId: string | null) {
+  if (!chapterId) {
+    latestReport.value = null
+    return
+  }
+
+  try {
+    latestReport.value = await validationReportsApi.getLatestValidationReport(chapterId, { draftType: 'fusion' })
+  } catch {
+    latestReport.value = null
+  }
+}
+
+async function syncChapterFromRoute() {
+  const chapterId = parseQueryValue(route.query.chapter_id)
+  if (chapterId) {
+    chapterFilter.value = chapterId
+    await loadLatestReport(chapterId)
+    return
+  }
+  latestReport.value = null
 }
 
 async function changeStatus(issueId: string, status: 'unresolved' | 'resolved' | 'ignored') {
@@ -260,8 +312,16 @@ watch([chapterFilter, severityFilter, statusFilter], () => {
   void loadIssues()
 })
 
+watch(
+  () => route.query.chapter_id,
+  () => {
+    void syncChapterFromRoute()
+  }
+)
+
 onMounted(async () => {
   await loadChapters()
+  await syncChapterFromRoute()
   await loadIssues()
 })
 </script>

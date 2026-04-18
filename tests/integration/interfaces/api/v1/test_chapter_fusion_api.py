@@ -111,34 +111,119 @@ def _insert_state_lock(db, chapter_id: str, novel_id: str, version: int = 1):
     db.get_connection().commit()
 
 
+def _insert_fusion_job_and_draft(
+    db,
+    *,
+    chapter_id: str,
+    novel_id: str,
+    job_id: str,
+    fusion_id: str,
+    state_lock_version: int = 1,
+    plan_version: int = 1,
+):
+    now = "2026-04-17T00:00:00"
+    db.execute(
+        """
+        INSERT INTO fusion_jobs (
+            fusion_job_id, chapter_id, novel_id, plan_version, state_lock_version,
+            beat_ids_json, target_words, suspense_budget_json, status, error_message,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            chapter_id,
+            novel_id,
+            plan_version,
+            state_lock_version,
+            json.dumps(["b1", "b2"], ensure_ascii=False),
+            1400,
+            json.dumps({"primary": 1, "secondary": 2}, ensure_ascii=False),
+            "warning",
+            "",
+            now,
+            now,
+        ),
+    )
+    db.execute(
+        """
+        INSERT INTO chapter_fusion_drafts (
+            fusion_id, fusion_job_id, chapter_id, source_beat_ids_json, plan_version,
+            state_lock_version, text, repeat_ratio, facts_confirmed_json, open_questions_json,
+            end_state_json, warnings_json, state_lock_violations_json, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            fusion_id,
+            job_id,
+            chapter_id,
+            json.dumps(["b1", "b2"], ensure_ascii=False),
+            plan_version,
+            state_lock_version,
+            "融合后的章节正文",
+            0.24,
+            json.dumps(["线索 A"], ensure_ascii=False),
+            json.dumps(["谜团 B"], ensure_ascii=False),
+            json.dumps({"scene": "终态"}, ensure_ascii=False),
+            json.dumps(["重复功能偏高，建议检查开场桥接"], ensure_ascii=False),
+            json.dumps([], ensure_ascii=False),
+            "completed",
+            now,
+            now,
+        ),
+    )
+    db.get_connection().commit()
+
+
 def test_create_and_get_fusion_job(client, db, test_novel_id):
     chapter_id = "ch-12"
     _insert_chapter(db, chapter_id, test_novel_id, 12)
     _insert_beat_sheet(db, chapter_id)
     _insert_state_lock(db, chapter_id, test_novel_id)
 
-    res = client.post(
-        f"/api/v1/chapters/{chapter_id}/fusion-jobs",
-        json={
-            "plan_version": 1,
-            "state_lock_version": 1,
-            "beat_ids": ["b1", "b2"],
-            "target_words": 1400,
-            "suspense_budget": {"primary": 1, "secondary": 2},
-        },
+    job_id = "fj-test-1"
+    _insert_fusion_job_and_draft(
+        db,
+        chapter_id=chapter_id,
+        novel_id=test_novel_id,
+        job_id=job_id,
+        fusion_id="fd-test-1",
+        state_lock_version=1,
+        plan_version=1,
     )
-    assert res.status_code == 201
-    payload = res.json()
-    assert payload["status"] == "queued"
-    job_id = payload["fusion_job_id"]
 
     got = client.get(f"/api/v1/fusion-jobs/{job_id}")
     assert got.status_code == 200
     body = got.json()
     assert body["fusion_job_id"] == job_id
-    assert body["status"] in {"completed", "warning"}
+    assert body["status"] == "warning"
     assert body["fusion_draft"]["text"]
     assert body["preview"]["expected_suspense_count"] >= 1
+
+
+def test_get_latest_fusion_job_for_chapter(client, db, test_novel_id):
+    chapter_id = "ch-12-latest"
+    _insert_chapter(db, chapter_id, test_novel_id, 12)
+    _insert_beat_sheet(db, chapter_id)
+    _insert_state_lock(db, chapter_id, test_novel_id)
+
+    job_id = "fj-test-latest"
+    _insert_fusion_job_and_draft(
+        db,
+        chapter_id=chapter_id,
+        novel_id=test_novel_id,
+        job_id=job_id,
+        fusion_id="fd-test-latest",
+        state_lock_version=1,
+        plan_version=1,
+    )
+
+    got = client.get(f"/api/v1/chapters/{chapter_id}/fusion-jobs/latest")
+    assert got.status_code == 200
+    body = got.json()
+    assert body["fusion_job_id"] == job_id
+    assert body["chapter_id"] == chapter_id
+    assert body["fusion_draft"]["chapter_id"] == chapter_id
 
 
 def test_create_fusion_job_blocks_without_beats(client, db, test_novel_id):

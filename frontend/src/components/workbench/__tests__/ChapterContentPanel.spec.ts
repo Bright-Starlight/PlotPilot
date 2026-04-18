@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   generateStateLocks: vi.fn(),
   updateStateLocks: vi.fn(),
   createFusionJob: vi.fn(),
+  getLatestFusionJob: vi.fn(),
   getFusionJob: vi.fn(),
   startValidation: vi.fn(),
   getValidationReport: vi.fn(),
@@ -85,6 +86,7 @@ vi.mock('@/api/beatSheet', () => ({
 vi.mock('@/api/chapterFusion', () => ({
   chapterFusionApi: {
     createFusionJob: mocks.createFusionJob,
+    getLatestFusionJob: mocks.getLatestFusionJob,
     getFusionJob: mocks.getFusionJob,
   },
 }))
@@ -303,6 +305,34 @@ beforeEach(() => {
     fusion_draft: null,
     preview: null,
   })
+  mocks.getLatestFusionJob.mockResolvedValue({
+    fusion_job_id: 'job-1',
+    chapter_id: 'chapter-1',
+    status: 'completed',
+    error_message: '',
+    fusion_draft: {
+      fusion_id: 'fusion-1',
+      chapter_id: 'chapter-1',
+      plan_version: 3,
+      state_lock_version: 5,
+      status: 'completed',
+      text: '融合后的章节正文',
+      estimated_repeat_ratio: 0.24,
+      facts_confirmed: ['线索 A'],
+      open_questions: ['谜团 B'],
+      end_state: { scene: '终态' },
+      warnings: ['重复功能偏高，建议检查开场桥接'],
+      state_lock_violations: [],
+      latest_validation_report_id: 'vr-1',
+    },
+    preview: {
+      estimated_words: 1800,
+      estimated_repeat_ratio: 0.24,
+      expected_end_state: { scene: '终态' },
+      expected_suspense_count: 2,
+      risk_warnings: ['重复功能偏高，建议检查开场桥接'],
+    },
+  })
   mocks.getFusionJob.mockResolvedValue({
     fusion_job_id: 'job-1',
     chapter_id: 'chapter-1',
@@ -375,6 +405,7 @@ describe('ChapterContentPanel', () => {
     const panel = mountPanel()
     await flushPromises()
 
+    expect(mocks.getLatestFusionJob).toHaveBeenCalledWith('chapter-1')
     expect(panel.findAll('n-tab-pane')).toHaveLength(5)
     expect(panel.text()).toContain('来自章节大纲，用于叙事摘要和向量检索')
     expect(panel.text()).toContain('左侧是节拍草稿摘要，右侧是当前融合草稿。此处用来查看融合是否过度压缩或丢失桥接。')
@@ -421,6 +452,7 @@ describe('ChapterContentPanel', () => {
     expect(mocks.generateBeatSheet).toHaveBeenCalledWith({
       chapter_id: 'chapter-1',
       outline: '重复句\n重复句\n收束',
+      state_lock_version: 5,
     })
 
     await (panel.vm as unknown as { createFusionJob: () => Promise<void> }).createFusionJob()
@@ -451,13 +483,53 @@ describe('ChapterContentPanel', () => {
     panel.unmount()
   })
 
+  it('shows the latest validation report even when the newest fusion job has no draft yet', async () => {
+    mocks.getLatestFusionJob.mockResolvedValueOnce({
+      fusion_job_id: 'job-running',
+      chapter_id: 'chapter-1',
+      status: 'running',
+      error_message: '',
+      fusion_draft: null,
+      preview: null,
+    })
+    mocks.getLatestValidationReport.mockResolvedValueOnce({
+      ...baseValidationReport,
+    })
+
+    const panel = mountPanel()
+    await flushPromises()
+
+    expect(mocks.getLatestValidationReport).toHaveBeenCalledWith('chapter-1', { draftType: 'fusion' })
+    expect(panel.text()).toContain('报告 vr-1')
+    expect(panel.text()).toContain('违反终态锁')
+
+    panel.unmount()
+  })
+
+  it('loads latest fusion job for the current chapter before local cache', async () => {
+    window.localStorage.setItem('plotpilot:fusion-job:novel-1:1', 'stale-job')
+
+    const panel = mountPanel()
+    await flushPromises()
+
+    expect(mocks.getLatestFusionJob).toHaveBeenCalledWith('chapter-1')
+    expect(mocks.getFusionJob).not.toHaveBeenCalled()
+    expect(panel.text()).toContain('任务 job-1')
+    expect(panel.text()).toContain('融合后的章节正文')
+
+    panel.unmount()
+  })
+
   it('supports validation issue actions and validation center navigation', async () => {
     window.localStorage.setItem('plotpilot:fusion-job:novel-1:1', 'job-1')
     const panel = mountPanel()
     await flushPromises()
 
     await (panel.vm as unknown as { openValidationCenter: () => void }).openValidationCenter()
-    expect(mocks.routerPush).toHaveBeenCalledWith('/book/novel-1/validation-center')
+    expect(mocks.routerPush).toHaveBeenCalledWith({
+      path: '/book/novel-1/validation-center',
+      query: { chapter_id: 'chapter-1' },
+    })
 
     await (panel.vm as unknown as { requestRepairPatch: (issue: typeof baseValidationReport.issues_by_severity.P0[0]) => Promise<void> }).requestRepairPatch(baseValidationReport.issues_by_severity.P0[0] as never)
     await flushPromises()

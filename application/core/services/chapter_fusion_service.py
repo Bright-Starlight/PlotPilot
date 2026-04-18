@@ -265,6 +265,9 @@ class ChapterFusionService:
     def get_job(self, fusion_job_id: str):
         return self.fusion_repository.get_job(fusion_job_id)
 
+    def get_latest_job_for_chapter(self, chapter_id: str):
+        return self.fusion_repository.get_latest_job_for_chapter(chapter_id)
+
     def get_logs(self, fusion_job_id: str):
         return self.fusion_repository.list_logs(fusion_job_id)
 

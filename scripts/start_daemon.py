@@ -56,6 +56,7 @@ from interfaces.api.dependencies import (
     get_novel_repository,
     get_chapter_repository,
     get_chapter_fusion_service,
+    get_beat_sheet_service,
     get_state_lock_service,
     get_voice_drift_service,
     get_knowledge_service,
@@ -140,6 +141,7 @@ def build_daemon() -> AutopilotDaemon:
             novel_repository=novel_repo,
             state_lock_service=get_state_lock_service(),
             chapter_fusion_service=get_chapter_fusion_service(),
+            beat_sheet_service=get_beat_sheet_service(),
         )
         logger.info("ChapterAftermathPipeline 已注入（质量门禁 + 叙事/向量/文风/KG；三元组与伏笔、故事线、张力、对话、剧情点单次 LLM）")
     except Exception as e:

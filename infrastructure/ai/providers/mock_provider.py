@@ -1,5 +1,6 @@
 """Mock LLM Provider for testing without API keys"""
 import json
+import re
 from typing import AsyncIterator
 from domain.ai.value_objects.prompt import Prompt
 from domain.ai.value_objects.token_usage import TokenUsage
@@ -493,19 +494,20 @@ class MockProvider(LLMService):
             )
         elif "fusion_generation_v1" in user_prompt:
             facts = []
-            if "必保留事实" in prompt.user:
-                fact_block = prompt.user.split("必保留事实：", 1)[1].split("输出要求：", 1)[0]
+            fact_match = re.search(r"必保留事实[:：](.*?)(?:\n\s*状态锁[:：]|\n\s*输出要求[:：])", prompt.user, re.S)
+            if fact_match:
+                fact_block = fact_match.group(1)
                 for line in fact_block.splitlines():
                     line = line.strip()
                     if line.startswith("- "):
                         facts.append(line[2:].strip())
             suspense_target = 0
-            for marker in ("主悬念", "支悬念"):
-                if marker in prompt.user:
-                    try:
-                        suspense_target += int(prompt.user.split(marker, 1)[1].split("，", 1)[0].strip())
-                    except Exception:
-                        pass
+            suspense_match = re.search(r"悬念预算[:：].*?主悬念\s*(\d+).*?支悬念\s*(\d+)", prompt.user, re.S)
+            if suspense_match:
+                try:
+                    suspense_target = int(suspense_match.group(1)) + int(suspense_match.group(2))
+                except ValueError:
+                    suspense_target = 0
             text = "沈惊鸿理清线索，按节拍推进局势。" if not facts else "。".join(facts) + "。"
             content = json.dumps(
                 {

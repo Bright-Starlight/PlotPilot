@@ -65,7 +65,7 @@ def _build_pipeline(blocking_issue_count: int = 0):
                     order_index=1,
                 ),
             ],
-            state_lock_version=2,
+            state_lock_version=1,
             plan_version=3,
         )
     )
@@ -87,6 +87,46 @@ def _build_pipeline(blocking_issue_count: int = 0):
         status="completed" if blocking_issue_count == 0 else "failed",
     )
 
+    refreshed_beat_sheet = SimpleNamespace(
+        scenes=[
+            SimpleNamespace(
+                title="开场",
+                goal="建立局势",
+                pov_character="沈惊鸿",
+                location="客栈",
+                tone="紧张",
+                estimated_words=500,
+                order_index=0,
+            ),
+            SimpleNamespace(
+                title="转折",
+                goal="前往钱府",
+                pov_character="沈惊鸿",
+                location="钱府",
+                tone="深夜",
+                estimated_words=600,
+                order_index=1,
+            ),
+        ],
+        state_lock_version=2,
+        plan_version=3,
+    )
+    stale_beat_sheet = SimpleNamespace(
+        scenes=refreshed_beat_sheet.scenes,
+        state_lock_version=1,
+        plan_version=3,
+    )
+    fusion_service.beat_sheet_repository.get_by_chapter_id.return_value = stale_beat_sheet
+
+    beat_sheet_service = Mock()
+    async def _generate_beat_sheet(**kwargs):
+        fusion_service.beat_sheet_repository.get_by_chapter_id.return_value = refreshed_beat_sheet
+        payload = {"id": "bs-1", "scenes": refreshed_beat_sheet.scenes}
+        payload.update(kwargs)
+        return SimpleNamespace(**payload)
+
+    beat_sheet_service.generate_beat_sheet = AsyncMock(side_effect=_generate_beat_sheet)
+
     return ChapterAftermathPipeline(
         knowledge_service=Mock(),
         chapter_indexing_service=Mock(),
@@ -95,12 +135,13 @@ def _build_pipeline(blocking_issue_count: int = 0):
         chapter_repository=_FakeChapterRepository(chapter),
         state_lock_service=state_lock_service,
         chapter_fusion_service=fusion_service,
-    ), state_lock_service, fusion_service
+        beat_sheet_service=beat_sheet_service,
+    ), state_lock_service, fusion_service, beat_sheet_service
 
 
 @pytest.mark.asyncio
 async def test_run_after_chapter_saved_executes_quality_gate_before_sync():
-    pipeline, state_lock_service, fusion_service = _build_pipeline(blocking_issue_count=0)
+    pipeline, state_lock_service, fusion_service, beat_sheet_service = _build_pipeline(blocking_issue_count=0)
 
     with patch(
         "application.world.services.chapter_narrative_sync.sync_chapter_narrative_after_save",
@@ -115,6 +156,12 @@ async def test_run_after_chapter_saved_executes_quality_gate_before_sync():
     assert result["fusion_id"] == "fd-1"
     assert result["validation_report_id"] == "vr-1"
     state_lock_service.generate_state_locks.assert_awaited_once()
+    beat_sheet_service.generate_beat_sheet.assert_awaited_once_with(
+        chapter_id="chapter-1",
+        outline="旧大纲",
+        plan_version=3,
+        state_lock_version=2,
+    )
     fusion_service.create_job.assert_called_once()
     fusion_service.run_job.assert_awaited_once()
     sync_mock.assert_awaited_once()
@@ -123,7 +170,7 @@ async def test_run_after_chapter_saved_executes_quality_gate_before_sync():
 
 @pytest.mark.asyncio
 async def test_run_after_chapter_saved_blocks_sync_when_validation_has_blocking_issues():
-    pipeline, state_lock_service, fusion_service = _build_pipeline(blocking_issue_count=1)
+    pipeline, state_lock_service, fusion_service, beat_sheet_service = _build_pipeline(blocking_issue_count=1)
 
     with patch(
         "application.world.services.chapter_narrative_sync.sync_chapter_narrative_after_save",
@@ -138,6 +185,7 @@ async def test_run_after_chapter_saved_blocks_sync_when_validation_has_blocking_
     assert result["quality_gate_step"] == "validation"
     assert result["validation_report_id"] == "vr-1"
     state_lock_service.generate_state_locks.assert_awaited_once()
+    beat_sheet_service.generate_beat_sheet.assert_awaited_once()
     fusion_service.create_job.assert_called_once()
     fusion_service.run_job.assert_awaited_once()
     sync_mock.assert_not_awaited()
@@ -146,7 +194,7 @@ async def test_run_after_chapter_saved_blocks_sync_when_validation_has_blocking_
 
 @pytest.mark.asyncio
 async def test_run_after_chapter_saved_skips_quality_gate_by_default():
-    pipeline, state_lock_service, fusion_service = _build_pipeline(blocking_issue_count=0)
+    pipeline, state_lock_service, fusion_service, beat_sheet_service = _build_pipeline(blocking_issue_count=0)
 
     with patch(
         "application.world.services.chapter_narrative_sync.sync_chapter_narrative_after_save",
@@ -161,6 +209,7 @@ async def test_run_after_chapter_saved_skips_quality_gate_by_default():
     assert result.get("fusion_id", "") == ""
     assert result.get("validation_report_id", "") == ""
     state_lock_service.generate_state_locks.assert_not_awaited()
+    beat_sheet_service.generate_beat_sheet.assert_not_awaited()
     fusion_service.create_job.assert_not_called()
     fusion_service.run_job.assert_not_awaited()
     sync_mock.assert_awaited_once()

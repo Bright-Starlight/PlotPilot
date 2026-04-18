@@ -141,10 +141,7 @@
             </n-space>
           </template>
           <n-space vertical :size="8">
-            <n-alert v-if="!fusionDraft" type="info" :show-icon="true" size="small">
-              生成融合稿后会自动触发一次校验，这里展示最新报告。
-            </n-alert>
-            <template v-else-if="validationReport">
+            <template v-if="validationReport">
               <n-space :size="8" wrap>
                 <n-tag size="small" round :type="validationReport.passed ? 'success' : 'error'">
                   {{ validationReport.passed ? '校验通过' : '存在阻断问题' }}
@@ -239,6 +236,9 @@
                 </n-list>
               </n-space>
             </template>
+            <n-alert v-else-if="!fusionDraft" type="info" :show-icon="true" size="small">
+              生成融合稿后会自动触发一次校验，这里展示最新报告。
+            </n-alert>
             <n-alert v-else type="warning" :show-icon="true" size="small">
               还没有校验报告。可手动触发一次校验，或重新生成融合稿后自动刷新。
             </n-alert>
@@ -680,6 +680,7 @@ async function loadFusionJob(fusionJobId: string) {
   try {
     const job = await chapterFusionApi.getFusionJob(fusionJobId)
     fusionJob.value = job
+    persistFusionJobId(job.fusion_job_id)
     if (job.status === 'queued' || job.status === 'running') {
       clearFusionPoll()
       fusionPollTimer.value = window.setInterval(() => {
@@ -699,35 +700,70 @@ async function loadFusionJob(fusionJobId: string) {
 }
 
 async function loadLatestFusionJob() {
-  const jobId = loadStoredFusionJobId()
-  if (!jobId) {
+  const chapterId = fusionChapterId.value
+  if (!chapterId) {
     fusionJob.value = null
     validationReport.value = null
     clearFusionPoll()
     return
   }
-  await loadFusionJob(jobId)
+
+  try {
+    const job = await chapterFusionApi.getLatestFusionJob(chapterId)
+    fusionJob.value = job
+    persistFusionJobId(job.fusion_job_id)
+    if (job.status === 'queued' || job.status === 'running') {
+      clearFusionPoll()
+      fusionPollTimer.value = window.setInterval(() => {
+        void loadFusionJob(job.fusion_job_id)
+      }, 1600)
+    } else {
+      clearFusionPoll()
+    }
+    await loadLatestValidationReport()
+    return
+  } catch {
+    const jobId = loadStoredFusionJobId()
+    if (!jobId) {
+      fusionJob.value = null
+      validationReport.value = null
+      clearFusionPoll()
+      return
+    }
+    await loadFusionJob(jobId)
+    return
+  }
 }
 
 async function loadLatestValidationReport() {
   const chapterId = fusionChapterId.value
   const draft = fusionDraft.value
-  if (!chapterId || !draft) {
+  if (!chapterId) {
     validationReport.value = null
     return
   }
   validationLoading.value = true
   try {
     if (draft.latest_validation_report_id) {
-      validationReport.value = await validationReportsApi.getValidationReport(draft.latest_validation_report_id)
-      return
+      try {
+        validationReport.value = await validationReportsApi.getValidationReport(draft.latest_validation_report_id)
+        return
+      } catch {
+        // Fall through to chapter-level lookup.
+      }
     }
     validationReport.value = await validationReportsApi.getLatestValidationReport(chapterId, {
       draftType: 'fusion',
-      draftId: draft.fusion_id,
+      ...(draft?.fusion_id ? { draftId: draft.fusion_id } : {}),
     })
   } catch {
-    validationReport.value = null
+    try {
+      validationReport.value = await validationReportsApi.getLatestValidationReport(chapterId, {
+        draftType: 'fusion',
+      })
+    } catch {
+      validationReport.value = null
+    }
   } finally {
     validationLoading.value = false
   }
@@ -940,7 +976,15 @@ async function requestRepairPatch(issue: ValidationIssueDTO) {
 }
 
 function openValidationCenter() {
-  router.push(`/book/${props.slug}/validation-center`)
+  const chapterId = fusionChapterId.value
+  if (!chapterId) {
+    router.push(`/book/${props.slug}/validation-center`)
+    return
+  }
+  router.push({
+    path: `/book/${props.slug}/validation-center`,
+    query: { chapter_id: chapterId },
+  })
 }
 
 function lockStatusTagType(status: string): 'success' | 'warning' | 'error' | 'info' | 'default' {

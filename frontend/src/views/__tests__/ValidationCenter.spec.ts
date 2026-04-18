@@ -5,6 +5,7 @@ import ValidationCenter from '@/views/ValidationCenter.vue'
 const mocks = vi.hoisted(() => ({
   listChapters: vi.fn(),
   listValidationIssues: vi.fn(),
+  getLatestValidationReport: vi.fn(),
   updateValidationIssue: vi.fn(),
   buildRepairPatch: vi.fn(),
   routerPush: vi.fn(),
@@ -14,9 +15,14 @@ const mocks = vi.hoisted(() => ({
   },
 }))
 
+const routeState = vi.hoisted(() => ({
+  query: {} as Record<string, string>,
+}))
+
 vi.mock('vue-router', () => ({
   useRoute: () => ({
     params: { slug: 'novel-1' },
+    query: routeState.query,
   }),
   useRouter: () => ({
     push: mocks.routerPush,
@@ -36,6 +42,7 @@ vi.mock('@/api/chapter', () => ({
 vi.mock('@/api/validationReports', () => ({
   validationReportsApi: {
     listValidationIssues: mocks.listValidationIssues,
+    getLatestValidationReport: mocks.getLatestValidationReport,
     updateValidationIssue: mocks.updateValidationIssue,
     buildRepairPatch: mocks.buildRepairPatch,
   },
@@ -68,6 +75,22 @@ describe('ValidationCenter', () => {
         metadata: {},
       },
     ])
+    mocks.getLatestValidationReport.mockResolvedValue({
+      report_id: 'vr-latest',
+      chapter_id: 'chapter-1',
+      draft_type: 'fusion',
+      draft_id: 'fd-latest',
+      plan_version: 1,
+      state_lock_version: 29,
+      status: 'finished',
+      passed: true,
+      blocking_issue_count: 0,
+      p0_count: 0,
+      p1_count: 0,
+      p2_count: 0,
+      token_usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+      issues_by_severity: {},
+    })
     mocks.updateValidationIssue.mockResolvedValue({
       issue_id: 'vi-1',
       report_id: 'vr-1',
@@ -112,6 +135,18 @@ describe('ValidationCenter', () => {
       status: 'unresolved',
     })
     expect(wrapper.text()).toContain('违反终态锁')
+  })
+
+  it('loads the latest report when chapter_id is present in the route', async () => {
+    routeState.query.chapter_id = 'chapter-1'
+    const wrapper = mountView()
+    await flushPromises()
+    routeState.query = {}
+
+    expect(mocks.getLatestValidationReport).toHaveBeenCalledWith('chapter-1', { draftType: 'fusion' })
+    expect(wrapper.text()).toContain('vr-latest')
+    expect(wrapper.text()).toContain('草稿 fd-latest')
+    expect(wrapper.text()).toContain('第 1 章')
   })
 
   it('supports issue actions and chapter navigation', async () => {

@@ -50,6 +50,9 @@ export const chapterFusionApi = {
   createFusionJob: (chapterId: string, data: CreateFusionJobRequest) =>
     apiClient.post<FusionJobDTO>(`/chapters/${chapterId}/fusion-jobs`, data) as Promise<FusionJobDTO>,
 
+  getLatestFusionJob: (chapterId: string) =>
+    apiClient.get<FusionJobDTO>(`/chapters/${chapterId}/fusion-jobs/latest`) as Promise<FusionJobDTO>,
+
   getFusionJob: (fusionJobId: string) =>
     apiClient.get<FusionJobDTO>(`/fusion-jobs/${fusionJobId}`) as Promise<FusionJobDTO>,
 }

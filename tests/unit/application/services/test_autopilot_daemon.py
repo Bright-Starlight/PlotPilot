@@ -1,4 +1,5 @@
 """AutopilotDaemon 辅助逻辑测试"""
+from datetime import datetime, timezone
 import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -284,6 +285,47 @@ async def test_handle_auditing_stops_when_quality_gate_retry_fails():
     assert novel.autopilot_status == AutopilotStatus.STOPPED
     assert novel.current_stage == NovelStage.AUDITING
     assert novel.last_audit_narrative_ok is False
+
+
+@pytest.mark.asyncio
+async def test_process_novel_skips_duplicate_auditing_for_same_chapter():
+    chapter_repository = Mock()
+    chapter_repository.list_by_novel.return_value = [
+        Mock(
+            number=1,
+            status=Mock(value="completed"),
+            id="chapter-1",
+            content="旧正文",
+            updated_at=datetime(2026, 4, 18, 21, 8, 0),
+        ),
+    ]
+
+    daemon = AutopilotDaemon(
+        novel_repository=Mock(),
+        llm_service=Mock(),
+        context_builder=None,
+        background_task_service=Mock(),
+        planning_service=Mock(),
+        story_node_repo=Mock(),
+        chapter_repository=chapter_repository,
+        aftermath_pipeline=Mock(),
+    )
+
+    daemon._is_still_running = Mock(return_value=True)
+    daemon._handle_auditing = AsyncMock()
+    daemon._handle_macro_planning = AsyncMock()
+    daemon._handle_act_planning = AsyncMock()
+    daemon._handle_writing = AsyncMock()
+
+    novel = _build_novel()
+    novel.current_stage = NovelStage.AUDITING
+    novel.last_audit_chapter_number = 1
+    novel.last_audit_at = "2026-04-18T21:08:30+00:00"
+
+    await daemon._process_novel(novel)
+
+    daemon._handle_auditing.assert_not_awaited()
+    chapter_repository.list_by_novel.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -323,6 +323,7 @@ def get_chapter_aftermath_pipeline():
         novel_repository=get_novel_repository(),
         state_lock_service=get_state_lock_service(),
         chapter_fusion_service=get_chapter_fusion_service(),
+        beat_sheet_service=get_beat_sheet_service(),
     )
 
 
