@@ -18,11 +18,16 @@ class BeatSheet(BaseEntity):
         self,
         id: str,
         chapter_id: str,
-        scenes: List[Scene]
+        scenes: List[Scene],
+        *,
+        plan_version: int = 0,
+        state_lock_version: int = 0,
     ):
         super().__init__(id)
         self.chapter_id = chapter_id
         self.scenes = scenes
+        self.plan_version = int(plan_version or 0)
+        self.state_lock_version = int(state_lock_version or 0)
 
     def get_scene_count(self) -> int:
         """获取场景数量"""

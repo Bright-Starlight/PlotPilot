@@ -12,6 +12,8 @@ class ChapterState:
     character_actions: List[Dict[str, Any]]  # List[{character_id, action, chapter}]
     relationship_changes: List[Dict[str, Any]]  # List[{char1, char2, old_type, new_type, chapter}]
     events: List[Dict[str, Any]]  # List[{type, description, involved_characters, chapter}]
+    foreshadowing_planted: List[Dict[str, Any]] = field(default_factory=list)  # List[{description, chapter}]
+    foreshadowing_resolved: List[Dict[str, Any]] = field(default_factory=list)  # List[{foreshadowing_id|description, chapter}]
     timeline_events: List[Dict[str, Any]] = field(default_factory=list)  # List[{event, timestamp, timestamp_type}]
     advanced_storylines: List[Dict[str, Any]] = field(default_factory=list)  # List[{storyline_id, progress_summary}]
     new_storylines: List[Dict[str, Any]] = field(default_factory=list)  # List[{name, type, description}]
@@ -23,6 +25,10 @@ class ChapterState:
     def has_relationship_changes(self) -> bool:
         """检查是否有关系变化"""
         return len(self.relationship_changes) > 0
+
+    def has_foreshadowing_activity(self) -> bool:
+        """检查是否有伏笔活动（埋下或回收）。"""
+        return len(self.foreshadowing_planted) > 0 or len(self.foreshadowing_resolved) > 0
 
     def has_timeline_events(self) -> bool:
         """检查是否有时间线事件"""

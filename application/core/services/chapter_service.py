@@ -23,6 +23,7 @@ class ChapterService:
         novel_repository: NovelRepository,
         chapter_review_repository=None,
         chapter_generation_metrics_repository=None,
+        chapter_draft_binding_repository=None,
     ):
         """初始化服务
 
@@ -35,6 +36,7 @@ class ChapterService:
         self.novel_repository = novel_repository
         self.chapter_review_repository = chapter_review_repository
         self.chapter_generation_metrics_repository = chapter_generation_metrics_repository
+        self.chapter_draft_binding_repository = chapter_draft_binding_repository
 
     def update_chapter_content(
         self,
@@ -122,6 +124,7 @@ class ChapterService:
         chapter_number: int,
         content: str,
         generation_metrics: dict | None = None,
+        draft_binding: dict | None = None,
     ) -> Optional[ChapterDTO]:
         """根据小说 ID 和章节号更新章节内容
 
@@ -147,8 +150,40 @@ class ChapterService:
                         chapter_number,
                         generation_metrics,
                     )
+                if draft_binding and self.chapter_draft_binding_repository:
+                    normalized_binding = self._normalize_draft_binding(draft_binding)
+                    self.chapter_draft_binding_repository.upsert_binding(
+                        chapter_id=chapter.id,
+                        novel_id=novel_id,
+                        draft_type=normalized_binding["draft_type"],
+                        draft_id=normalized_binding["draft_id"],
+                        plan_version=normalized_binding["plan_version"],
+                        state_lock_version=normalized_binding["state_lock_version"],
+                        source_fusion_id=normalized_binding.get("source_fusion_id"),
+                    )
                 return ChapterDTO.from_domain(chapter)
         raise EntityNotFoundError("Chapter", f"{novel_id}/chapter-{chapter_number}")
+
+    @staticmethod
+    def _normalize_draft_binding(draft_binding: dict) -> dict:
+        draft_type = str(draft_binding.get("draft_type") or "merged").strip() or "merged"
+        if draft_type not in {"merged", "patch"}:
+            raise ValueError("Unsupported chapter draft binding type")
+        draft_id = str(draft_binding.get("draft_id") or f"{draft_type}-current").strip() or f"{draft_type}-current"
+        plan_version = int(draft_binding.get("plan_version") or 0)
+        state_lock_version = int(draft_binding.get("state_lock_version") or 0)
+        if plan_version <= 0:
+            raise ValueError("draft_binding.plan_version must be > 0")
+        if state_lock_version <= 0:
+            raise ValueError("draft_binding.state_lock_version must be > 0")
+        source_fusion_id = draft_binding.get("source_fusion_id")
+        return {
+            "draft_type": draft_type,
+            "draft_id": draft_id,
+            "plan_version": plan_version,
+            "state_lock_version": state_lock_version,
+            "source_fusion_id": str(source_fusion_id).strip() if source_fusion_id else None,
+        }
 
     def get_chapter_generation_metrics(
         self,

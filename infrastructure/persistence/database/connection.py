@@ -221,6 +221,22 @@ def _apply_chapter_summaries_enhancements(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _apply_chapter_fusion_enhancements(conn: sqlite3.Connection) -> None:
+    """为 chapter_fusion_drafts 表补齐状态锁违规列。"""
+    cur = conn.execute("PRAGMA table_info(chapter_fusion_drafts)")
+    cols = {row[1] for row in cur.fetchall()}
+    if not cols:
+        return
+    if "state_lock_violations_json" not in cols:
+        try:
+            conn.execute(
+                "ALTER TABLE chapter_fusion_drafts ADD COLUMN state_lock_violations_json TEXT NOT NULL DEFAULT '[]'"
+            )
+            logger.info("chapter_fusion_drafts migration: added state_lock_violations_json")
+        except sqlite3.OperationalError as e:
+            logger.warning("chapter_fusion_drafts migration skip state_lock_violations_json: %s", e)
+    conn.commit()
+
 
 def _apply_migration_files(conn: sqlite3.Connection) -> None:
     """应用独立的迁移文件（幂等执行）"""
@@ -233,6 +249,9 @@ def _apply_migration_files(conn: sqlite3.Connection) -> None:
         "add_tension_dimensions.sql",
         "add_use_legacy_chat_completions.sql",
         "add_chapter_fusion_tables.sql",
+        "add_chapter_draft_bindings.sql",
+        "add_state_lock_tables.sql",
+        "add_validation_tables.sql",
     ]
     
     for migration_file in migration_files:
@@ -333,6 +352,7 @@ class DatabaseConnection:
         _apply_last_chapter_audit_columns(conn)
         _apply_character_enhancements(conn)
         _apply_chapter_summaries_enhancements(conn)
+        _apply_chapter_fusion_enhancements(conn)
         _ensure_triple_provenance_table(conn)
         _apply_migration_files(conn)
         conn.close()

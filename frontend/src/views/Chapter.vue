@@ -219,7 +219,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { useMessage, useDialog } from 'naive-ui'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { chapterApi } from '../api/chapter'
+import { chapterApi, type ChapterDTO } from '../api/chapter'
+import { validationReportsApi, type PublishGateDTO } from '../api/validationReports'
 import { knowledgeGraphApi, type InferenceFactBundle } from '../api/knowledgeGraph'
 import { useStatsStore } from '../stores/statsStore'
 
@@ -291,6 +292,7 @@ const reviewStatus = ref('pending')
 const reviewMemo = ref('')
 const savingReview = ref(false)
 const savingAiReview = ref(false)
+const currentChapterRecord = ref<ChapterDTO | null>(null)
 const chapterStructure = ref<{
   word_count: number
   paragraph_count: number
@@ -405,7 +407,7 @@ const saveContent = async () => {
   }
 }
 
-const saveReview = async () => {
+const persistReview = async () => {
   const cid = chapterId.value
   if (cid == null) return
   savingReview.value = true
@@ -421,6 +423,43 @@ const saveReview = async () => {
   } finally {
     savingReview.value = false
   }
+}
+
+const saveReview = async () => {
+  const newStatus = statusToNew(reviewStatus.value)
+  if (newStatus !== 'approved') {
+    await persistReview()
+    return
+  }
+  if (!currentChapterRecord.value?.id) {
+    message.error('当前章节信息尚未加载完成')
+    return
+  }
+  dialog.warning({
+    title: '发布前复校',
+    content: '发布前会强制重新校验当前融合稿；如果仍有未处理的 P0 阻断问题，将禁止发布。',
+    positiveText: '继续发布',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        const gate = await validationReportsApi.checkPublishable(currentChapterRecord.value!.id)
+        if (!gate.publishable) {
+          showPublishBlockedDialog(gate)
+          return false
+        }
+        await persistReview()
+        return true
+      } catch (error: any) {
+        const detail = error?.response?.data?.detail
+        if (detail && typeof detail === 'object') {
+          showPublishBlockedDialog(detail as PublishGateDTO)
+          return false
+        }
+        message.error(getApiErrorMessage(error) || '发布校验失败')
+        return false
+      }
+    },
+  })
 }
 
 const runAiReview = async (save: boolean) => {
@@ -494,6 +533,7 @@ const loadChapter = async () => {
 
   // Handle chapter data API result
   if (chapterData.status === 'fulfilled') {
+    currentChapterRecord.value = chapterData.value
     content.value = chapterData.value.content || ''
     if (content.value) {
       createTime.value = new Date(chapterData.value.created_at).toLocaleString('zh-CN', { hour12: false })
@@ -501,6 +541,7 @@ const loadChapter = async () => {
     }
     updatePreview(false)
   } else {
+    currentChapterRecord.value = null
     console.error('Failed to load chapter:', chapterData.reason)
   }
 
@@ -635,6 +676,33 @@ onUnmounted(() => {
   if (saveTimer.value) clearTimeout(saveTimer.value)
   if (markdownDebounceTimer.value) clearTimeout(markdownDebounceTimer.value)
 })
+
+function showPublishBlockedDialog(payload: Partial<PublishGateDTO> & { issues?: Array<{ severity?: string; title?: string; message?: string }> }) {
+  const issues = Array.isArray(payload.blocking_issues) ? payload.blocking_issues : (payload.issues ?? [])
+  const lines = issues.slice(0, 5).map(issue => `- ${issue.severity || 'P0'} ${issue.title || '未命名问题'}：${issue.message || ''}`)
+  dialog.error({
+    title: '发布已阻断',
+    content: [
+      `当前仍有 ${payload.blocking_issue_count ?? issues.length ?? 0} 个未解决的阻断问题。`,
+      lines.join('\n'),
+    ].filter(Boolean).join('\n'),
+    positiveText: '知道了',
+  })
+}
+
+function getApiErrorMessage(error: unknown): string {
+  if (typeof error !== 'object' || error === null) return ''
+  const response = (error as { response?: { data?: unknown } }).response
+  const data = response?.data
+  if (typeof data === 'string') return data
+  if (typeof data === 'object' && data !== null) {
+    const detail = (data as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.trim()) return detail
+    const message = (data as { message?: unknown }).message
+    if (typeof message === 'string' && message.trim()) return message
+  }
+  return ''
+}
 </script>
 
 <style scoped>

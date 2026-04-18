@@ -14,8 +14,18 @@ const mocks = vi.hoisted(() => ({
   bibleGetBible: vi.fn(),
   getBeatSheet: vi.fn(),
   generateBeatSheet: vi.fn(),
+  getCurrentStateLocks: vi.fn(),
+  generateStateLocks: vi.fn(),
+  updateStateLocks: vi.fn(),
   createFusionJob: vi.fn(),
   getFusionJob: vi.fn(),
+  startValidation: vi.fn(),
+  getValidationReport: vi.fn(),
+  getLatestValidationReport: vi.fn(),
+  listValidationIssues: vi.fn(),
+  updateValidationIssue: vi.fn(),
+  buildRepairPatch: vi.fn(),
+  routerPush: vi.fn(),
 }))
 
 const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -26,6 +36,12 @@ vi.mock('naive-ui', async () => {
     useMessage: () => mocks.message,
   }
 })
+
+vi.mock('vue-router', () => ({
+  useRouter: () => ({
+    push: mocks.routerPush,
+  }),
+}))
 
 vi.mock('@/stores/workbenchRefreshStore', () => ({
   useWorkbenchRefreshStore: () => ({}),
@@ -70,6 +86,25 @@ vi.mock('@/api/chapterFusion', () => ({
   chapterFusionApi: {
     createFusionJob: mocks.createFusionJob,
     getFusionJob: mocks.getFusionJob,
+  },
+}))
+
+vi.mock('@/api/stateLocks', () => ({
+  stateLocksApi: {
+    getCurrentStateLocks: mocks.getCurrentStateLocks,
+    generateStateLocks: mocks.generateStateLocks,
+    updateStateLocks: mocks.updateStateLocks,
+  },
+}))
+
+vi.mock('@/api/validationReports', () => ({
+  validationReportsApi: {
+    startValidation: mocks.startValidation,
+    getValidationReport: mocks.getValidationReport,
+    getLatestValidationReport: mocks.getLatestValidationReport,
+    listValidationIssues: mocks.listValidationIssues,
+    updateValidationIssue: mocks.updateValidationIssue,
+    buildRepairPatch: mocks.buildRepairPatch,
   },
 }))
 
@@ -173,6 +208,73 @@ const baseBible = {
   style_notes: [],
 }
 
+const baseStateLocks = {
+  state_lock_id: 'sl-1',
+  chapter_id: 'chapter-1',
+  version: 5,
+  plan_version: 3,
+  source: 'generated',
+  change_reason: '',
+  changed_fields: [],
+  inference_notes: [],
+  critical_change: {},
+  time_lock: { entries: [] },
+  location_lock: { entries: [] },
+  character_lock: { entries: [] },
+  item_lock: { entries: [] },
+  numeric_lock: { entries: [] },
+  event_lock: { entries: [] },
+  ending_lock: {
+    entries: [
+      {
+        key: 'ending_target',
+        label: '目标终态',
+        value: '门已开启',
+        source: 'generated',
+        kind: 'ending_target',
+        status: 'normal',
+        metadata: {},
+      },
+    ],
+  },
+}
+
+const baseValidationReport = {
+  report_id: 'vr-1',
+  chapter_id: 'chapter-1',
+  draft_type: 'fusion',
+  draft_id: 'fusion-1',
+  plan_version: 3,
+  state_lock_version: 5,
+  status: 'completed',
+  passed: false,
+  blocking_issue_count: 1,
+  p0_count: 1,
+  p1_count: 0,
+  p2_count: 0,
+  token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+  issues_by_severity: {
+    P0: [
+      {
+        issue_id: 'vi-1',
+        report_id: 'vr-1',
+        chapter_id: 'chapter-1',
+        severity: 'P0',
+        code: 'ending_lock_violation',
+        title: '违反终态锁',
+        message: '终态落点应为钱府，实际为客栈',
+        spans: [{ paragraph_index: 0, start_offset: 0, end_offset: 4, excerpt: '融合后的章节正文' }],
+        blocking: true,
+        suggest_patch: true,
+        status: 'unresolved',
+        metadata: { group: 'ending_lock' },
+      },
+    ],
+    P1: [],
+    P2: [],
+  },
+}
+
 function mountPanel() {
   return mount(ChapterContentPanel, {
     props: {
@@ -190,6 +292,9 @@ beforeEach(() => {
   mocks.bibleGetBible.mockResolvedValue(baseBible)
   mocks.getBeatSheet.mockResolvedValue(baseBeatSheet)
   mocks.generateBeatSheet.mockResolvedValue(baseBeatSheet)
+  mocks.getCurrentStateLocks.mockResolvedValue(baseStateLocks)
+  mocks.generateStateLocks.mockResolvedValue(baseStateLocks)
+  mocks.updateStateLocks.mockResolvedValue(baseStateLocks)
   mocks.createFusionJob.mockResolvedValue({
     fusion_job_id: 'job-1',
     chapter_id: 'chapter-1',
@@ -206,12 +311,17 @@ beforeEach(() => {
     fusion_draft: {
       fusion_id: 'fusion-1',
       chapter_id: 'chapter-1',
+      plan_version: 3,
+      state_lock_version: 5,
+      status: 'completed',
       text: '融合后的章节正文',
       estimated_repeat_ratio: 0.24,
       facts_confirmed: ['线索 A'],
       open_questions: ['谜团 B'],
       end_state: { scene: '终态' },
       warnings: ['重复功能偏高，建议检查开场桥接'],
+      state_lock_violations: [],
+      latest_validation_report_id: 'vr-1',
     },
     preview: {
       estimated_words: 1800,
@@ -220,6 +330,38 @@ beforeEach(() => {
       expected_suspense_count: 2,
       risk_warnings: ['重复功能偏高，建议检查开场桥接'],
     },
+  })
+  mocks.startValidation.mockResolvedValue({
+    report_id: 'vr-1',
+    chapter_id: 'chapter-1',
+    draft_type: 'fusion',
+    draft_id: 'fusion-1',
+    plan_version: 3,
+    state_lock_version: 5,
+    status: 'completed',
+    passed: false,
+    blocking_issue_count: 1,
+    p0_count: 1,
+    p1_count: 0,
+    p2_count: 0,
+    token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+  })
+  mocks.getValidationReport.mockResolvedValue({
+    ...baseValidationReport,
+  })
+  mocks.getLatestValidationReport.mockResolvedValue({
+    ...baseValidationReport,
+  })
+  mocks.updateValidationIssue.mockImplementation(async (_issueId: string, status: string) => ({
+    ...baseValidationReport.issues_by_severity.P0[0],
+    report_id: 'vr-1',
+    chapter_id: 'chapter-1',
+    status,
+  }))
+  mocks.buildRepairPatch.mockResolvedValue({
+    issue_id: 'vi-1',
+    patch_text: '建议将章末改写为人物抵达钱府并确认门已开启。',
+    source: 'heuristic',
   })
 })
 
@@ -240,12 +382,16 @@ describe('ChapterContentPanel', () => {
     expect(panel.text()).toContain('chapter-1')
     expect(panel.text()).toContain('2700')
     expect(panel.text()).toContain('主 1 / 支 2')
-    expect(panel.text()).toContain('门已开启')
+    expect(panel.text()).toContain('版本 v5')
+    expect(panel.text()).toContain('目标终态')
 
     await (panel.vm as unknown as { createFusionJob: () => Promise<void> }).createFusionJob()
     await flushPromises()
 
-    expect(mocks.createFusionJob).toHaveBeenCalledWith('chapter-1', expect.any(Object))
+    expect(mocks.createFusionJob).toHaveBeenCalledWith('chapter-1', expect.objectContaining({
+      state_lock_version: 5,
+    }))
+    expect(mocks.getCurrentStateLocks).toHaveBeenCalledWith('chapter-1')
     expect(mocks.getBeatSheet).toHaveBeenCalledWith('chapter-1')
     expect(panel.text()).toContain('queued')
     expect(panel.text()).toContain('任务 job-1')
@@ -299,6 +445,28 @@ describe('ChapterContentPanel', () => {
     expect(panel.text()).toContain('重复率 24%')
     expect(panel.text()).toContain('融合后的章节正文')
     expect(panel.text()).toContain('重复功能偏高，建议检查开场桥接')
+    expect(panel.text()).toContain('存在阻断问题')
+    expect(panel.text()).toContain('定位锁项')
+
+    panel.unmount()
+  })
+
+  it('supports validation issue actions and validation center navigation', async () => {
+    window.localStorage.setItem('plotpilot:fusion-job:novel-1:1', 'job-1')
+    const panel = mountPanel()
+    await flushPromises()
+
+    await (panel.vm as unknown as { openValidationCenter: () => void }).openValidationCenter()
+    expect(mocks.routerPush).toHaveBeenCalledWith('/book/novel-1/validation-center')
+
+    await (panel.vm as unknown as { requestRepairPatch: (issue: typeof baseValidationReport.issues_by_severity.P0[0]) => Promise<void> }).requestRepairPatch(baseValidationReport.issues_by_severity.P0[0] as never)
+    await flushPromises()
+    expect(mocks.buildRepairPatch).toHaveBeenCalledWith('vi-1')
+    expect(panel.text()).toContain('建议将章末改写为人物抵达钱府并确认门已开启。')
+
+    await (panel.vm as unknown as { updateIssueStatus: (issue: typeof baseValidationReport.issues_by_severity.P0[0], status: 'resolved') => Promise<void> }).updateIssueStatus(baseValidationReport.issues_by_severity.P0[0] as never, 'resolved')
+    await flushPromises()
+    expect(mocks.updateValidationIssue).toHaveBeenCalledWith('vi-1', 'resolved')
 
     panel.unmount()
   })

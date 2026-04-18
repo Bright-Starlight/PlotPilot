@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS chapter_fusion_drafts (
     open_questions_json TEXT NOT NULL DEFAULT '[]',
     end_state_json TEXT NOT NULL DEFAULT '{}',
     warnings_json TEXT NOT NULL DEFAULT '[]',
+    state_lock_violations_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'draft',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

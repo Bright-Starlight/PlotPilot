@@ -112,6 +112,15 @@ class AutoNovelGenerationWorkflow:
         self.storyline_manager = storyline_manager
         self.plot_arc_repository = plot_arc_repository
         self.llm_service = llm_service
+        self._legacy_generation_mode = (
+            state_extractor is None
+            and state_updater is None
+            and bible_repository is None
+            and foreshadowing_repository is None
+            and conflict_detection_service is None
+            and voice_fingerprint_service is None
+            and cliche_scanner is None
+        )
         
         # 强制初始化 StateExtractor（如果未提供）
         if state_extractor is None:
@@ -163,11 +172,26 @@ class AutoNovelGenerationWorkflow:
             max_tokens=max_tokens,
             scene_director=scene_director,
         )
-        context = (
-            f"{payload['layer1_text']}\n\n=== SMART RETRIEVAL ===\n{payload['layer2_text']}\n\n"
-            f"=== RECENT CONTEXT ===\n{payload['layer3_text']}"
-        )
-        context_tokens = payload["token_usage"]["total"]
+        if isinstance(payload, dict) and all(
+            key in payload for key in ("layer1_text", "layer2_text", "layer3_text", "token_usage")
+        ):
+            context = (
+                f"{payload['layer1_text']}\n\n=== SMART RETRIEVAL ===\n{payload['layer2_text']}\n\n"
+                f"=== RECENT CONTEXT ===\n{payload['layer3_text']}"
+            )
+            context_tokens = payload["token_usage"]["total"]
+        else:
+            # 兼容旧 ContextBuilder mock / 旧实现：仅提供 build_context()。
+            build_context_kwargs = {
+                "novel_id": novel_id,
+                "chapter_number": chapter_number,
+                "outline": outline,
+                "max_tokens": max_tokens,
+            }
+            if scene_director is not None:
+                build_context_kwargs["scene_director"] = scene_director
+            context = self.context_builder.build_context(**build_context_kwargs)
+            context_tokens = self.context_builder.estimate_tokens(context)
         style_summary = self._get_style_summary(novel_id)
         voice_anchors = ""
         try:
@@ -462,25 +486,42 @@ class AutoNovelGenerationWorkflow:
         )
         content = sanitize_chapter_output(content)
 
-        logger.info("阶段 4: 后处理（post_process_generated_chapter）")
-        post = await self.post_process_generated_chapter(
-            novel_id, chapter_number, outline, content, scene_director=scene_director
-        )
-        seam_rewrite_info = post.get("seam_rewrite_info") or {}
-        content = sanitize_chapter_output(post.get("content") or content)
-        style_warnings = post["style_warnings"]
-        consistency_report = post["consistency_report"]
-        ghost_annotations = post["ghost_annotations"]
-        if style_warnings:
-            logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
-        if seam_rewrite_info.get("applied"):
-            logger.info(
-                "  ✓ 接缝修复已执行: attempts=%s status=%s",
-                seam_rewrite_info.get("attempts"),
-                seam_rewrite_info.get("status"),
+        if self._legacy_generation_mode:
+            logger.info("阶段 4: 兼容模式后处理（跳过状态提取，保留一致性检查）")
+            seam_rewrite_info = {}
+            style_warnings = []
+            ghost_annotations = []
+            consistency_report = self._check_consistency(
+                ChapterState(
+                    new_characters=[],
+                    character_actions=[],
+                    relationship_changes=[],
+                    foreshadowing_planted=[],
+                    foreshadowing_resolved=[],
+                    events=[],
+                ),
+                novel_id,
             )
-        if self._requires_manual_seam_revision(seam_rewrite_info):
-            raise RuntimeError("章节接缝复检未通过，需要人工修订后再保存")
+        else:
+            logger.info("阶段 4: 后处理（post_process_generated_chapter）")
+            post = await self.post_process_generated_chapter(
+                novel_id, chapter_number, outline, content, scene_director=scene_director
+            )
+            seam_rewrite_info = post.get("seam_rewrite_info") or {}
+            content = sanitize_chapter_output(post.get("content") or content)
+            style_warnings = post["style_warnings"]
+            consistency_report = post["consistency_report"]
+            ghost_annotations = post["ghost_annotations"]
+            if style_warnings:
+                logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
+            if seam_rewrite_info.get("applied"):
+                logger.info(
+                    "  ✓ 接缝修复已执行: attempts=%s status=%s",
+                    seam_rewrite_info.get("attempts"),
+                    seam_rewrite_info.get("status"),
+                )
+            if self._requires_manual_seam_revision(seam_rewrite_info):
+                raise RuntimeError("章节接缝复检未通过，需要人工修订后再保存")
 
         # Phase 5: Review - 返回结果
         logger.info(f"阶段 5: 完成 - 章节生成完成")

@@ -26,12 +26,17 @@ class FusionSuspenseBudgetDTO:
 class FusionDraftDTO:
     fusion_id: str
     chapter_id: str
+    plan_version: int
+    state_lock_version: int
     text: str
     estimated_repeat_ratio: float
+    status: str = "draft"
     facts_confirmed: List[str] = field(default_factory=list)
     open_questions: List[str] = field(default_factory=list)
     end_state: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    state_lock_violations: List[Dict[str, Any]] = field(default_factory=list)
+    latest_validation_report_id: str = ""
 
 
 @dataclass

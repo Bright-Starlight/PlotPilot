@@ -52,6 +52,29 @@ class _FakeLLMService(LLMService):
         yield json.dumps(self.payload, ensure_ascii=False)
 
 
+class _FakeStateLockRepository:
+    def __init__(self, present: bool = True):
+        self.present = present
+
+    def has_version(self, chapter_id: str, version: int) -> bool:
+        return self.present and version > 0
+
+    def get_version_by_chapter(self, chapter_id: str, version: int):
+        if not self.has_version(chapter_id, version):
+            return None
+        return type("StateLockSnapshot", (), {
+            "locks": {
+                "ending_lock": {
+                    "entries": [
+                        {"key": "ending_target", "label": "目标终态", "value": "钱府", "kind": "ending_target"},
+                    ]
+                },
+                "character_lock": {"entries": []},
+                "numeric_lock": {"entries": []},
+            }
+        })()
+
+
 class TestChapterFusionService:
     @pytest.fixture
     def chapter(self):
@@ -79,6 +102,7 @@ class TestChapterFusionService:
             chapter_repository=_FakeChapterRepository(chapter),
             beat_sheet_repository=_FakeBeatSheetRepository(scenes),
             fusion_repository=fusion_repo,
+            state_lock_repository=_FakeStateLockRepository(),
             llm_service=_FakeLLMService(),
         )
 
@@ -153,6 +177,7 @@ class TestChapterFusionService:
                 ]
             ),
             fusion_repository=fusion_repo,
+            state_lock_repository=_FakeStateLockRepository(),
             llm_service=_FakeLLMService(),
         )
 
@@ -190,6 +215,7 @@ class TestChapterFusionService:
                 ]
             ),
             fusion_repository=fusion_repo,
+            state_lock_repository=_FakeStateLockRepository(),
             llm_service=_FakeLLMService(),
         )
 
@@ -220,6 +246,7 @@ class TestChapterFusionService:
             chapter_repository=_FakeChapterRepository(chapter),
             beat_sheet_repository=_FakeBeatSheetRepository(scenes),
             fusion_repository=fusion_repo,
+            state_lock_repository=_FakeStateLockRepository(),
             llm_service=_FakeLLMService(
                 {
                     "text": "沈惊鸿在钱府落脚，却突然被写成留在客栈。",
@@ -244,12 +271,34 @@ class TestChapterFusionService:
         assert result["status"] == "failed"
         assert "conflicts" in result["message"]
 
+    def test_create_job_blocks_when_state_lock_version_not_found(self, chapter, scenes):
+        fusion_repo = Mock()
+        service = ChapterFusionService(
+            chapter_repository=_FakeChapterRepository(chapter),
+            beat_sheet_repository=_FakeBeatSheetRepository(scenes),
+            fusion_repository=fusion_repo,
+            state_lock_repository=_FakeStateLockRepository(present=False),
+            llm_service=_FakeLLMService(),
+        )
+
+        with pytest.raises(ValueError, match="State locks must be generated"):
+            service.create_job(
+                chapter_id="ch-1",
+                plan_version=1,
+                state_lock_version=1,
+                beat_ids=["b1"],
+                target_words=1800,
+                suspense_budget={"primary": 1, "secondary": 1},
+            )
+
 
 class TestFusionJobPreview:
     def test_preview_uses_estimated_word_count_not_character_count(self):
         draft = FusionDraftDTO(
             fusion_id="fd-1",
             chapter_id="ch-1",
+            plan_version=1,
+            state_lock_version=1,
             text="第一章 开场叙述与推进, second beat arrives.",
             estimated_repeat_ratio=0.1,
             warnings=[],

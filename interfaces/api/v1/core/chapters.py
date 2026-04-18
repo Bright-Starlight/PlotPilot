@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 
 from application.core.services.chapter_service import ChapterService
+from application.core.services.validation_service import ValidationService
 from application.core.services.novel_service import NovelService
 from application.core.dtos.chapter_dto import ChapterDTO
 from application.core.dtos.novel_dto import NovelDTO
@@ -16,6 +17,7 @@ from interfaces.api.dependencies import (
     get_chapter_service,
     get_novel_service,
     get_chapter_aftermath_pipeline,
+    get_validation_service,
 )
 from domain.shared.exceptions import EntityNotFoundError
 logger = logging.getLogger(__name__)
@@ -34,11 +36,20 @@ async def _run_chapter_aftermath(
 router = APIRouter(tags=["chapters"])
 
 
-# Request Models
+class ChapterDraftBindingRequest(BaseModel):
+    """正文草稿绑定请求。"""
+    draft_type: Literal["merged", "patch"] = Field(default="merged", description="正文草稿类型")
+    draft_id: str = Field(default="merged-current", min_length=1, description="正文草稿标识")
+    plan_version: int = Field(..., gt=0, description="绑定的规划版本")
+    state_lock_version: int = Field(..., gt=0, description="绑定的状态锁版本")
+    source_fusion_id: str | None = Field(default=None, description="可选来源融合稿 ID")
+
+
 class UpdateChapterContentRequest(BaseModel):
     """更新章节内容请求"""
     content: str = Field(..., min_length=0, max_length=100000, description="章节内容")
     generation_metrics: dict | None = Field(default=None, description="可选的生成质量控制指标")
+    draft_binding: ChapterDraftBindingRequest | None = Field(default=None, description="可选的正文草稿绑定信息")
 
 
 class SaveChapterReviewRequest(BaseModel):
@@ -201,6 +212,7 @@ async def update_chapter(
             chapter_number,
             request.content,
             request.generation_metrics,
+            request.draft_binding.model_dump() if request.draft_binding else None,
         )
     except EntityNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -267,7 +279,8 @@ async def save_chapter_review(
     novel_id: str,
     request: SaveChapterReviewRequest,
     chapter_number: int = Path(..., gt=0, description="章节编号"),
-    service: ChapterService = Depends(get_chapter_service)
+    service: ChapterService = Depends(get_chapter_service),
+    validation_service: ValidationService = Depends(get_validation_service),
 ):
     """保存章节审阅
 
@@ -284,11 +297,64 @@ async def save_chapter_review(
         HTTPException: 如果章节不存在
     """
     try:
+        logger.info(
+            "chapter review save requested novel_id=%s chapter_number=%s status=%s",
+            novel_id,
+            chapter_number,
+            request.status,
+        )
+        if request.status == "approved":
+            chapter = service.get_chapter_by_novel_and_number(novel_id, chapter_number)
+            if chapter is None:
+                raise HTTPException(status_code=404, detail=f"Chapter not found: {novel_id}/chapter-{chapter_number}")
+            logger.info(
+                "publish gate check requested chapter_id=%s novel_id=%s chapter_number=%s",
+                chapter.id,
+                novel_id,
+                chapter_number,
+            )
+            publishable, report, blocking_issues = await validation_service.get_publish_gate_status(chapter.id)
+            if not publishable:
+                logger.warning(
+                    "publish gate blocked chapter_id=%s report_id=%s blocking_issue_count=%s",
+                    chapter.id,
+                    report.report_id,
+                    len(blocking_issues),
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": "Publish blocked by unresolved blocking validation issues",
+                        "report_id": report.report_id,
+                        "blocking_issue_count": report.blocking_issue_count,
+                        "issues": [
+                            {
+                                "issue_id": issue.issue_id,
+                                "severity": issue.severity,
+                                "title": issue.title,
+                                "message": issue.message,
+                            }
+                            for issue in blocking_issues
+                        ],
+                    },
+                )
+            logger.info(
+                "publish gate passed chapter_id=%s report_id=%s blocking_issue_count=%s",
+                chapter.id,
+                report.report_id,
+                len(blocking_issues),
+            )
         review = service.save_chapter_review(
             novel_id,
             chapter_number,
             request.status,
             request.memo
+        )
+        logger.info(
+            "chapter review saved novel_id=%s chapter_number=%s status=%s",
+            novel_id,
+            chapter_number,
+            review.status,
         )
         return ChapterReviewResponse(
             status=review.status,
@@ -296,6 +362,8 @@ async def save_chapter_review(
             created_at=review.created_at.isoformat(),
             updated_at=review.updated_at.isoformat()
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except EntityNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

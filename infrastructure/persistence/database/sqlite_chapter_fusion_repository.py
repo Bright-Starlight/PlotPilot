@@ -84,6 +84,7 @@ class SqliteChapterFusionRepository:
         open_questions: List[str],
         end_state: Dict[str, Any],
         warnings: List[str],
+        state_lock_violations: List[Dict[str, Any]],
         status: str,
     ) -> FusionDraftDTO:
         now = datetime.utcnow().isoformat()
@@ -102,10 +103,11 @@ class SqliteChapterFusionRepository:
                 open_questions_json,
                 end_state_json,
                 warnings_json,
+                state_lock_violations_json,
                 status,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(fusion_id) DO UPDATE SET
                 fusion_job_id = excluded.fusion_job_id,
                 chapter_id = excluded.chapter_id,
@@ -118,6 +120,7 @@ class SqliteChapterFusionRepository:
                 open_questions_json = excluded.open_questions_json,
                 end_state_json = excluded.end_state_json,
                 warnings_json = excluded.warnings_json,
+                state_lock_violations_json = excluded.state_lock_violations_json,
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
@@ -134,6 +137,7 @@ class SqliteChapterFusionRepository:
                 json.dumps(open_questions, ensure_ascii=False),
                 json.dumps(end_state, ensure_ascii=False),
                 json.dumps(warnings, ensure_ascii=False),
+                json.dumps(state_lock_violations, ensure_ascii=False),
                 status,
                 now,
                 now,
@@ -184,16 +188,118 @@ class SqliteChapterFusionRepository:
         )
         if not row:
             return None
+        latest_validation = self.db.fetch_one(
+            """
+            SELECT report_id
+            FROM validation_reports
+            WHERE chapter_id = ? AND draft_type = 'fusion' AND draft_id = ?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (row["chapter_id"], row["fusion_id"]),
+        )
         return FusionDraftDTO(
             fusion_id=row["fusion_id"],
             chapter_id=row["chapter_id"],
+            plan_version=int(row.get("plan_version") or 0),
+            state_lock_version=int(row.get("state_lock_version") or 0),
+            status=row.get("status") or "draft",
             text=row.get("text") or "",
             estimated_repeat_ratio=float(row.get("repeat_ratio") or 0.0),
             facts_confirmed=json.loads(row.get("facts_confirmed_json") or "[]"),
             open_questions=json.loads(row.get("open_questions_json") or "[]"),
             end_state=json.loads(row.get("end_state_json") or "{}"),
             warnings=json.loads(row.get("warnings_json") or "[]"),
+            state_lock_violations=json.loads(row.get("state_lock_violations_json") or "[]"),
+            latest_validation_report_id=(latest_validation or {}).get("report_id", ""),
         )
+
+    def get_draft(self, fusion_id: str) -> Optional[FusionDraftDTO]:
+        row = self.db.fetch_one(
+            """
+            SELECT * FROM chapter_fusion_drafts WHERE fusion_id = ?
+            """,
+            (fusion_id,),
+        )
+        if not row:
+            return None
+        latest_validation = self.db.fetch_one(
+            """
+            SELECT report_id
+            FROM validation_reports
+            WHERE chapter_id = ? AND draft_type = 'fusion' AND draft_id = ?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (row["chapter_id"], row["fusion_id"]),
+        )
+        return FusionDraftDTO(
+            fusion_id=row["fusion_id"],
+            chapter_id=row["chapter_id"],
+            plan_version=int(row.get("plan_version") or 0),
+            state_lock_version=int(row.get("state_lock_version") or 0),
+            status=row.get("status") or "draft",
+            text=row.get("text") or "",
+            estimated_repeat_ratio=float(row.get("repeat_ratio") or 0.0),
+            facts_confirmed=json.loads(row.get("facts_confirmed_json") or "[]"),
+            open_questions=json.loads(row.get("open_questions_json") or "[]"),
+            end_state=json.loads(row.get("end_state_json") or "{}"),
+            warnings=json.loads(row.get("warnings_json") or "[]"),
+            state_lock_violations=json.loads(row.get("state_lock_violations_json") or "[]"),
+            latest_validation_report_id=(latest_validation or {}).get("report_id", ""),
+        )
+
+    def get_latest_draft_for_chapter(self, chapter_id: str) -> Optional[FusionDraftDTO]:
+        row = self.db.fetch_one(
+            """
+            SELECT *
+            FROM chapter_fusion_drafts
+            WHERE chapter_id = ?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (chapter_id,),
+        )
+        if not row:
+            return None
+        latest_validation = self.db.fetch_one(
+            """
+            SELECT report_id
+            FROM validation_reports
+            WHERE chapter_id = ? AND draft_type = 'fusion' AND draft_id = ?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (row["chapter_id"], row["fusion_id"]),
+        )
+        return FusionDraftDTO(
+            fusion_id=row["fusion_id"],
+            chapter_id=row["chapter_id"],
+            plan_version=int(row.get("plan_version") or 0),
+            state_lock_version=int(row.get("state_lock_version") or 0),
+            status=row.get("status") or "draft",
+            text=row.get("text") or "",
+            estimated_repeat_ratio=float(row.get("repeat_ratio") or 0.0),
+            facts_confirmed=json.loads(row.get("facts_confirmed_json") or "[]"),
+            open_questions=json.loads(row.get("open_questions_json") or "[]"),
+            end_state=json.loads(row.get("end_state_json") or "{}"),
+            warnings=json.loads(row.get("warnings_json") or "[]"),
+            state_lock_violations=json.loads(row.get("state_lock_violations_json") or "[]"),
+            latest_validation_report_id=(latest_validation or {}).get("report_id", ""),
+        )
+
+    def mark_drafts_stale(self, chapter_id: str, min_state_lock_version: int, status: str) -> None:
+        self.db.execute(
+            """
+            UPDATE chapter_fusion_drafts
+            SET status = ?, updated_at = ?
+            WHERE chapter_id = ?
+              AND state_lock_version < ?
+              AND status IN ('draft', 'completed', 'warning', 'stale', 'needs_refusion')
+            """,
+            (status, datetime.utcnow().isoformat(), chapter_id, int(min_state_lock_version)),
+        )
+        self.db.get_connection().commit()
 
     def add_log(self, fusion_job_id: str, chapter_id: str, step_name: str, step_status: str, message: str) -> None:
         self.db.execute(
@@ -237,4 +343,3 @@ class SqliteChapterFusionRepository:
             return datetime.fromisoformat(str(value))
         except ValueError:
             return None
-

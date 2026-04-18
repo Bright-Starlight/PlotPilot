@@ -15,6 +15,13 @@ export interface ChapterDTO {
 export interface UpdateChapterRequest {
   content: string
   generation_metrics?: Record<string, unknown>
+  draft_binding?: {
+    draft_type?: 'merged' | 'patch'
+    draft_id?: string
+    plan_version: number
+    state_lock_version: number
+    source_fusion_id?: string | null
+  }
 }
 
 export interface ChapterReviewDTO {

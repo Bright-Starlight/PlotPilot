@@ -50,7 +50,10 @@ class BeatSheetService:
     async def generate_beat_sheet(
         self,
         chapter_id: str,
-        outline: str
+        outline: str,
+        *,
+        plan_version: int | None = None,
+        state_lock_version: int,
     ) -> BeatSheet:
         """为章节生成节拍表
 
@@ -62,6 +65,8 @@ class BeatSheetService:
             生成的节拍表
         """
         logger.info(f"Generating beat sheet for chapter {chapter_id}")
+        if state_lock_version <= 0:
+            raise ValueError("state_lock_version is required")
 
         # 1. 混合检索：获取相关上下文
         context = await self._retrieve_relevant_context(chapter_id, outline)
@@ -80,7 +85,9 @@ class BeatSheetService:
         beat_sheet = BeatSheet(
             id=str(uuid.uuid4()),
             chapter_id=chapter_id,
-            scenes=scenes
+            scenes=scenes,
+            plan_version=int(plan_version or 0),
+            state_lock_version=int(state_lock_version),
         )
 
         # 6. 保存到仓储

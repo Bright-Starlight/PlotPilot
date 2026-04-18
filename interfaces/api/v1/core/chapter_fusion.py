@@ -31,12 +31,17 @@ class CreateFusionJobRequest(BaseModel):
 class FusionDraftResponse(BaseModel):
     fusion_id: str
     chapter_id: str
+    plan_version: int
+    state_lock_version: int
+    status: str
     text: str
     estimated_repeat_ratio: float
     facts_confirmed: List[str]
     open_questions: List[str]
     end_state: Dict[str, Any]
     warnings: List[str]
+    state_lock_violations: List[Dict[str, Any]]
+    latest_validation_report_id: str = ""
 
 
 class FusionJobResponse(BaseModel):
@@ -94,4 +99,3 @@ async def get_fusion_job(
         fusion_draft=FusionDraftResponse(**draft.__dict__) if draft else None,
         preview=job.preview,
     )
-

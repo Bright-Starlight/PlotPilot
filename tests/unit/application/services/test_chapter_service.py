@@ -26,12 +26,23 @@ class TestChapterService:
         return Mock()
 
     @pytest.fixture
-    def service(self, mock_chapter_repository, mock_novel_repository, mock_generation_metrics_repository):
+    def mock_draft_binding_repository(self):
+        return Mock()
+
+    @pytest.fixture
+    def service(
+        self,
+        mock_chapter_repository,
+        mock_novel_repository,
+        mock_generation_metrics_repository,
+        mock_draft_binding_repository,
+    ):
         """创建服务实例"""
         return ChapterService(
             mock_chapter_repository,
             mock_novel_repository,
             chapter_generation_metrics_repository=mock_generation_metrics_repository,
+            chapter_draft_binding_repository=mock_draft_binding_repository,
         )
 
     def test_update_chapter_content(self, service, mock_chapter_repository):
@@ -160,3 +171,42 @@ class TestChapterService:
 
         assert dto.content == "更新后的内容"
         mock_generation_metrics_repository.upsert.assert_called_once()
+
+    def test_update_chapter_by_novel_and_number_persists_draft_binding(
+        self,
+        service,
+        mock_chapter_repository,
+        mock_draft_binding_repository,
+    ):
+        chapter = Chapter(
+            id="chapter-1",
+            novel_id=NovelId("novel-1"),
+            number=1,
+            title="第一章",
+            content="原始内容"
+        )
+        mock_chapter_repository.list_by_novel.return_value = [chapter]
+
+        dto = service.update_chapter_by_novel_and_number(
+            "novel-1",
+            1,
+            "更新后的内容",
+            draft_binding={
+                "draft_type": "merged",
+                "draft_id": "merged-current",
+                "plan_version": 3,
+                "state_lock_version": 5,
+                "source_fusion_id": "fd-1",
+            },
+        )
+
+        assert dto.content == "更新后的内容"
+        mock_draft_binding_repository.upsert_binding.assert_called_once_with(
+            chapter_id="chapter-1",
+            novel_id="novel-1",
+            draft_type="merged",
+            draft_id="merged-current",
+            plan_version=3,
+            state_lock_version=5,
+            source_fusion_id="fd-1",
+        )

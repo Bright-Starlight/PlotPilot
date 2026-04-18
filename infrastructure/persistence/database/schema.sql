@@ -530,6 +530,23 @@ CREATE TABLE IF NOT EXISTS chapter_generation_metrics (
 CREATE INDEX IF NOT EXISTS idx_chapter_generation_metrics_novel
     ON chapter_generation_metrics(novel_id, chapter_number);
 
+CREATE TABLE IF NOT EXISTS chapter_draft_bindings (
+    chapter_id TEXT NOT NULL,
+    novel_id TEXT NOT NULL,
+    draft_type TEXT NOT NULL,
+    draft_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    state_lock_version INTEGER NOT NULL,
+    source_fusion_id TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (chapter_id, draft_type, draft_id),
+    FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_chapter_draft_bindings_chapter_type
+    ON chapter_draft_bindings(chapter_id, draft_type, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS beat_sheets (
     id TEXT PRIMARY KEY,
     chapter_id TEXT NOT NULL UNIQUE,
@@ -537,6 +554,57 @@ CREATE TABLE IF NOT EXISTS beat_sheets (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ========== 章节状态锁（State Locks）==========
+CREATE TABLE IF NOT EXISTS state_locks (
+    state_lock_id TEXT PRIMARY KEY,
+    chapter_id TEXT NOT NULL UNIQUE,
+    novel_id TEXT NOT NULL,
+    current_version INTEGER NOT NULL DEFAULT 0,
+    latest_version INTEGER NOT NULL DEFAULT 0,
+    plan_version INTEGER NOT NULL DEFAULT 1,
+    time_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    location_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    character_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    item_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    numeric_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    event_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    ending_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    last_change_reason TEXT NOT NULL DEFAULT '',
+    last_source TEXT NOT NULL DEFAULT 'generated',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS state_lock_versions (
+    state_lock_version_id TEXT PRIMARY KEY,
+    state_lock_id TEXT NOT NULL,
+    chapter_id TEXT NOT NULL,
+    novel_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    plan_version INTEGER NOT NULL DEFAULT 1,
+    source TEXT NOT NULL DEFAULT 'generated',
+    change_reason TEXT NOT NULL DEFAULT '',
+    changed_fields_json TEXT NOT NULL DEFAULT '[]',
+    inference_notes_json TEXT NOT NULL DEFAULT '[]',
+    critical_change_json TEXT NOT NULL DEFAULT '{}',
+    time_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    location_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    character_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    item_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    numeric_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    event_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    ending_lock_json TEXT NOT NULL DEFAULT '{"entries":[]}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (state_lock_id) REFERENCES state_locks(state_lock_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_state_lock_versions_unique
+    ON state_lock_versions(state_lock_id, version);
+CREATE INDEX IF NOT EXISTS idx_state_locks_chapter
+    ON state_locks(chapter_id);
+CREATE INDEX IF NOT EXISTS idx_state_lock_versions_chapter
+    ON state_lock_versions(chapter_id, version DESC);
 
 -- ========== 章节融合（Fusion）==========
 CREATE TABLE IF NOT EXISTS fusion_jobs (
@@ -567,6 +635,7 @@ CREATE TABLE IF NOT EXISTS chapter_fusion_drafts (
     open_questions_json TEXT NOT NULL DEFAULT '[]',
     end_state_json TEXT NOT NULL DEFAULT '{}',
     warnings_json TEXT NOT NULL DEFAULT '[]',
+    state_lock_violations_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'draft',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -586,6 +655,50 @@ CREATE TABLE IF NOT EXISTS fusion_job_logs (
 
 CREATE INDEX IF NOT EXISTS idx_fusion_jobs_chapter ON fusion_jobs(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_fusion_job_logs_job ON fusion_job_logs(fusion_job_id, id);
+
+-- ========== 章节校验（Validation）==========
+CREATE TABLE IF NOT EXISTS validation_reports (
+    report_id TEXT PRIMARY KEY,
+    chapter_id TEXT NOT NULL,
+    novel_id TEXT NOT NULL,
+    draft_type TEXT NOT NULL,
+    draft_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    state_lock_version INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    passed INTEGER NOT NULL DEFAULT 0,
+    blocking_issue_count INTEGER NOT NULL DEFAULT 0,
+    p0_count INTEGER NOT NULL DEFAULT 0,
+    p1_count INTEGER NOT NULL DEFAULT 0,
+    p2_count INTEGER NOT NULL DEFAULT 0,
+    token_usage_json TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS validation_issues (
+    issue_id TEXT PRIMARY KEY,
+    report_id TEXT NOT NULL,
+    chapter_id TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    code TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    spans_json TEXT NOT NULL DEFAULT '[]',
+    blocking INTEGER NOT NULL DEFAULT 0,
+    suggest_patch INTEGER NOT NULL DEFAULT 0,
+    handling_status TEXT NOT NULL DEFAULT 'unresolved',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (report_id) REFERENCES validation_reports(report_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_validation_reports_chapter_draft
+    ON validation_reports(chapter_id, draft_type, draft_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_validation_issues_report
+    ON validation_issues(report_id);
+CREATE INDEX IF NOT EXISTS idx_validation_issues_filters
+    ON validation_issues(chapter_id, severity, handling_status);
 
 -- ========== 语义化快照系统（战役三 Task 12）==========
 -- Git-like 版本控制，只存指针不存正文深拷贝

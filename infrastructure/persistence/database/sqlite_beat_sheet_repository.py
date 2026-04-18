@@ -36,6 +36,8 @@ class SqliteBeatSheetRepository(BeatSheetRepository):
         data = {
             "id": beat_sheet.id,
             "chapter_id": beat_sheet.chapter_id,
+            "plan_version": int(getattr(beat_sheet, "plan_version", 0) or 0),
+            "state_lock_version": int(getattr(beat_sheet, "state_lock_version", 0) or 0),
             "scenes": scenes_data,
             "created_at": beat_sheet.created_at.isoformat(),
             "updated_at": beat_sheet.updated_at.isoformat(),
@@ -98,7 +100,9 @@ class SqliteBeatSheetRepository(BeatSheetRepository):
         beat_sheet = BeatSheet(
             id=data["id"],
             chapter_id=data["chapter_id"],
-            scenes=scenes
+            scenes=scenes,
+            plan_version=int(data.get("plan_version") or 0),
+            state_lock_version=int(data.get("state_lock_version") or 0),
         )
 
         return beat_sheet

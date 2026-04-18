@@ -99,6 +99,14 @@ class ContextBuilder:
         """Bible 角色声线/小动作锚点"""
         return self.bible_service.build_character_voice_anchor_section(novel_id)
 
+    def estimate_tokens(self, text: str) -> int:
+        """兼容旧调用方，代理到底层预算分配器的 token 估算。"""
+        try:
+            return int(self.budget_allocator.estimate_tokens(text))
+        except Exception:
+            # 回退到保守启发式，避免兼容层本身成为阻断点。
+            return max(0, len(str(text or "")) // 4)
+
     def build_context(
         self,
         novel_id: str,

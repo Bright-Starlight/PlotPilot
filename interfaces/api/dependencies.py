@@ -26,8 +26,11 @@ from infrastructure.persistence.database.sqlite_plot_arc_repository import Sqlit
 from infrastructure.persistence.database.sqlite_voice_vault_repository import SqliteVoiceVaultRepository
 from infrastructure.persistence.database.sqlite_voice_fingerprint_repository import SQLiteVoiceFingerprintRepository
 from infrastructure.persistence.database.sqlite_chapter_generation_metrics_repository import SqliteChapterGenerationMetricsRepository
+from infrastructure.persistence.database.sqlite_chapter_draft_binding_repository import SqliteChapterDraftBindingRepository
 from infrastructure.persistence.database.sqlite_beat_sheet_repository import SqliteBeatSheetRepository
 from infrastructure.persistence.database.sqlite_chapter_fusion_repository import SqliteChapterFusionRepository
+from infrastructure.persistence.database.sqlite_state_lock_repository import SqliteStateLockRepository
+from infrastructure.persistence.database.sqlite_validation_repository import SqliteValidationRepository
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.database.sqlite_cast_repository import SqliteCastRepository
 from infrastructure.persistence.database.sqlite_foreshadowing_repository import SqliteForeshadowingRepository
@@ -38,6 +41,8 @@ from application.ai.llm_control_service import LLMControlService
 from application.core.services.novel_service import NovelService
 from application.core.services.chapter_service import ChapterService
 from application.core.services.chapter_fusion_service import ChapterFusionService
+from application.core.services.state_lock_service import StateLockService
+from application.core.services.validation_service import ValidationService
 from application.world.services.bible_service import BibleService
 from application.world.services.cast_service import CastService
 from application.world.services.knowledge_service import KnowledgeService
@@ -229,6 +234,7 @@ def get_chapter_service() -> ChapterService:
         get_novel_repository(),
         review_repo,
         SqliteChapterGenerationMetricsRepository(get_database()),
+        SqliteChapterDraftBindingRepository(get_database()),
     )
 
 
@@ -238,6 +244,36 @@ def get_chapter_fusion_service() -> ChapterFusionService:
         chapter_repository=get_chapter_repository(),
         beat_sheet_repository=SqliteBeatSheetRepository(get_database()),
         fusion_repository=SqliteChapterFusionRepository(get_database()),
+        state_lock_repository=SqliteStateLockRepository(get_database()),
+        llm_service=get_llm_service(),
+        validation_service=get_validation_service(),
+    )
+
+
+def get_state_lock_service() -> StateLockService:
+    """获取章节状态锁服务。"""
+    return StateLockService(
+        chapter_repository=get_chapter_repository(),
+        story_node_repository=get_story_node_repository(),
+        knowledge_service=get_knowledge_service(),
+        bible_service=get_bible_service(),
+        state_lock_repository=SqliteStateLockRepository(get_database()),
+        fusion_repository=SqliteChapterFusionRepository(get_database()),
+        llm_service=get_llm_service(),
+    )
+
+
+def get_validation_service() -> ValidationService:
+    """获取章节校验服务。"""
+    return ValidationService(
+        chapter_repository=get_chapter_repository(),
+        fusion_repository=SqliteChapterFusionRepository(get_database()),
+        state_lock_service=get_state_lock_service(),
+        validation_repository=SqliteValidationRepository(get_database()),
+        chapter_draft_binding_repository=SqliteChapterDraftBindingRepository(get_database()),
+        story_node_repository=get_story_node_repository(),
+        knowledge_service=get_knowledge_service(),
+        bible_service=get_bible_service(),
         llm_service=get_llm_service(),
     )
 

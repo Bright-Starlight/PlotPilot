@@ -27,6 +27,8 @@ class BeatSheetResponse(BaseModel):
     """节拍表响应模型"""
     id: str
     chapter_id: str
+    plan_version: int = 0
+    state_lock_version: int = 0
     scenes: List[SceneResponse]
     total_scenes: int
     total_estimated_words: int
@@ -36,6 +38,8 @@ class GenerateBeatSheetRequest(BaseModel):
     """生成节拍表请求"""
     chapter_id: str = Field(..., description="章节 ID")
     outline: str = Field(..., description="章节大纲")
+    plan_version: int | None = Field(default=None, gt=0, description="规划版本（可选）")
+    state_lock_version: int = Field(..., gt=0, description="状态锁版本")
 
 
 @router.post("/generate", response_model=BeatSheetResponse)
@@ -56,12 +60,16 @@ async def generate_beat_sheet(
     try:
         beat_sheet = await service.generate_beat_sheet(
             chapter_id=request.chapter_id,
-            outline=request.outline
+            outline=request.outline,
+            plan_version=request.plan_version,
+            state_lock_version=request.state_lock_version,
         )
 
         return BeatSheetResponse(
             id=beat_sheet.id,
             chapter_id=beat_sheet.chapter_id,
+            plan_version=beat_sheet.plan_version,
+            state_lock_version=beat_sheet.state_lock_version,
             scenes=[
                 SceneResponse(
                     title=scene.title,
@@ -96,6 +104,8 @@ async def get_beat_sheet(
         return BeatSheetResponse(
             id=beat_sheet.id,
             chapter_id=beat_sheet.chapter_id,
+            plan_version=beat_sheet.plan_version,
+            state_lock_version=beat_sheet.state_lock_version,
             scenes=[
                 SceneResponse(
                     title=scene.title,

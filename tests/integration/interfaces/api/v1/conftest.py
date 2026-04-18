@@ -3,6 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from infrastructure.persistence.database.connection import DatabaseConnection
+from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.database.sqlite_entity_base_repository import (
     SqliteEntityBaseRepository
 )
@@ -34,6 +35,10 @@ def client(db, monkeypatch):
     monkeypatch.setattr(
         "interfaces.api.dependencies.get_database",
         mock_get_database,
+    )
+    monkeypatch.setattr(
+        "interfaces.api.dependencies.get_story_node_repository",
+        lambda: StoryNodeRepository(str(db.db_path)),
     )
 
     # Import app after monkeypatching

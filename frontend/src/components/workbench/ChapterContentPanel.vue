@@ -69,6 +69,182 @@
           </n-tabs>
         </n-card>
 
+        <n-card size="small" :bordered="true" class="state-lock-card">
+          <template #header>
+            <span class="card-title">🔒 State Locks</span>
+          </template>
+          <template #header-extra>
+            <n-space :size="6">
+              <n-button size="tiny" secondary :loading="stateLocksLoading" @click="generateStateLocks">
+                {{ stateLocks ? '重建锁版本' : '生成状态锁' }}
+              </n-button>
+              <n-button size="tiny" tertiary :disabled="!stateLocks" @click="openStateLockEditor">
+                编辑
+              </n-button>
+            </n-space>
+          </template>
+
+          <n-space vertical :size="8">
+            <n-alert v-if="!stateLocks" type="warning" :show-icon="true" size="small">
+              当前章节还没有冻结事实边界。先生成状态锁，再启动融合或后续校验。
+            </n-alert>
+            <template v-else>
+              <n-space :size="8" wrap>
+                <n-tag size="small" round>版本 v{{ stateLocks.version }}</n-tag>
+                <n-tag size="small" round>{{ stateLocks.source }}</n-tag>
+                <n-tag v-if="stateLocks.change_reason" size="small" type="warning" round>最近修改：{{ stateLocks.change_reason }}</n-tag>
+                <n-tag v-if="fusionUsesOutdatedStateLock" size="small" type="error" round>融合稿需重新生成</n-tag>
+              </n-space>
+              <n-alert v-if="fusionUsesOutdatedStateLock" type="warning" :show-icon="true" size="small">
+                当前融合稿绑定的是旧的状态锁版本，新的锁边界可能已经让它失效。
+              </n-alert>
+              <n-alert v-if="stateLocks.inference_notes.length" type="info" :show-icon="false" size="small">
+                {{ stateLocks.inference_notes[0] }}
+              </n-alert>
+              <div
+                v-for="item in stateLockGroups"
+                :id="`state-lock-group-${item.key}`"
+                :key="item.key"
+                class="state-lock-group"
+                :class="{ 'state-lock-group-active': activeLockGroup === item.key }"
+              >
+                <n-text strong class="diff-col-title">{{ item.label }}</n-text>
+                <n-empty v-if="!item.group?.entries?.length" description="无锁定条目" size="small" />
+                <n-list v-else hoverable bordered>
+                  <n-list-item v-for="entry in item.group.entries" :key="entry.key">
+                    <n-space vertical :size="4" style="width: 100%">
+                      <n-space align="center" justify="space-between">
+                        <n-text strong>{{ entry.label }}</n-text>
+                        <n-tag size="tiny" round :type="lockStatusTagType(entry.status)">{{ entry.status }}</n-tag>
+                      </n-space>
+                      <n-text depth="3" style="font-size: 12px; white-space: pre-wrap">{{ formatLockValue(entry.value) }}</n-text>
+                    </n-space>
+                  </n-list-item>
+                </n-list>
+              </div>
+            </template>
+          </n-space>
+        </n-card>
+
+        <n-card size="small" :bordered="true" class="validation-card">
+          <template #header>
+            <span class="card-title">🛡 Validation</span>
+          </template>
+          <template #header-extra>
+            <n-space :size="6">
+              <n-button size="tiny" tertiary @click="openValidationCenter">
+                验证中心
+              </n-button>
+              <n-button size="tiny" tertiary :loading="validationLoading" :disabled="!fusionDraft" @click="startValidation">
+                重新校验
+              </n-button>
+            </n-space>
+          </template>
+          <n-space vertical :size="8">
+            <n-alert v-if="!fusionDraft" type="info" :show-icon="true" size="small">
+              生成融合稿后会自动触发一次校验，这里展示最新报告。
+            </n-alert>
+            <template v-else-if="validationReport">
+              <n-space :size="8" wrap>
+                <n-tag size="small" round :type="validationReport.passed ? 'success' : 'error'">
+                  {{ validationReport.passed ? '校验通过' : '存在阻断问题' }}
+                </n-tag>
+                <n-tag size="small" round>报告 {{ validationReport.report_id }}</n-tag>
+                <n-tag size="small" round>P0 {{ validationReport.p0_count }}</n-tag>
+                <n-tag size="small" round>P1 {{ validationReport.p1_count }}</n-tag>
+                <n-tag size="small" round>P2 {{ validationReport.p2_count }}</n-tag>
+                <n-tag size="small" round>Token {{ validationReport.token_usage.total_tokens }}</n-tag>
+              </n-space>
+              <n-alert
+                v-if="validationReport.state_lock_version < (currentStateLockVersion || 0)"
+                type="warning"
+                :show-icon="true"
+                size="small"
+              >
+                当前报告绑定的是旧的状态锁版本，建议重新运行校验。
+              </n-alert>
+              <n-space v-for="group in validationIssueGroups" :key="group.severity" vertical :size="8">
+                <n-text strong class="diff-col-title">{{ group.severity }} 问题（{{ group.issues.length }}）</n-text>
+                <n-empty v-if="!group.issues.length" description="无问题" size="small" />
+                <n-list v-else hoverable bordered>
+                  <n-list-item v-for="issue in group.issues" :key="issue.issue_id">
+                    <n-space vertical :size="6" style="width: 100%">
+                      <n-space align="center" justify="space-between">
+                        <n-space :size="8" align="center">
+                          <n-tag size="tiny" :type="issue.blocking ? 'error' : 'warning'" round>
+                            {{ issue.blocking ? 'blocking' : 'advisory' }}
+                          </n-tag>
+                          <n-text strong>{{ issue.title }}</n-text>
+                        </n-space>
+                        <n-button
+                          v-if="issue.metadata.group"
+                          size="tiny"
+                          tertiary
+                          @click="jumpToLockGroup(String(issue.metadata.group || ''))"
+                        >
+                          定位锁项
+                        </n-button>
+                      </n-space>
+                      <n-text depth="3" style="font-size: 12px; white-space: pre-wrap">{{ issue.message }}</n-text>
+                      <n-text v-if="issue.spans.length" depth="3" style="font-size: 12px; white-space: pre-wrap">
+                        段落 {{ issue.spans[0].paragraph_index + 1 }}：{{ issue.spans[0].excerpt }}
+                      </n-text>
+                      <n-space :size="6" wrap>
+                        <n-button
+                          v-if="issue.suggest_patch"
+                          size="tiny"
+                          secondary
+                          :loading="issueActionLoading"
+                          @click="requestRepairPatch(issue)"
+                        >
+                          修复建议
+                        </n-button>
+                        <n-button
+                          size="tiny"
+                          tertiary
+                          :loading="issueActionLoading"
+                          @click="updateIssueStatus(issue, 'resolved')"
+                        >
+                          标记已解决
+                        </n-button>
+                        <n-button
+                          v-if="issue.severity !== 'P0'"
+                          size="tiny"
+                          tertiary
+                          :loading="issueActionLoading"
+                          @click="updateIssueStatus(issue, 'ignored')"
+                        >
+                          忽略
+                        </n-button>
+                        <n-button
+                          v-if="issue.status !== 'unresolved'"
+                          size="tiny"
+                          tertiary
+                          :loading="issueActionLoading"
+                          @click="updateIssueStatus(issue, 'unresolved')"
+                        >
+                          设为未处理
+                        </n-button>
+                      </n-space>
+                      <n-alert
+                        v-if="repairPatchByIssueId[issue.issue_id]"
+                        type="info"
+                        :show-icon="false"
+                        size="small"
+                      >
+                        {{ repairPatchByIssueId[issue.issue_id] }}
+                      </n-alert>
+                    </n-space>
+                  </n-list-item>
+                </n-list>
+              </n-space>
+            </template>
+            <n-alert v-else type="warning" :show-icon="true" size="small">
+              还没有校验报告。可手动触发一次校验，或重新生成融合稿后自动刷新。
+            </n-alert>
+          </n-space>
+        </n-card>
+
         <!-- 融合确认 -->
         <n-card size="small" :bordered="true" class="fusion-card">
           <template #header>
@@ -262,6 +438,28 @@
             </n-space>
           </n-space>
         </n-modal>
+
+        <n-modal v-model:show="stateLockEditorVisible" preset="card" title="编辑状态锁" style="width: min(780px, 96vw);">
+          <n-space vertical :size="12">
+            <n-alert type="warning" :show-icon="true" size="small">
+              保存会创建一个新的完整锁版本，并要求填写修改原因。
+            </n-alert>
+            <n-input
+              v-model:value="stateLockChangeReason"
+              type="text"
+              placeholder="修改原因，例如：终态地点改为钱府正厅"
+            />
+            <n-input
+              v-model:value="stateLockEditorJson"
+              type="textarea"
+              :autosize="{ minRows: 16, maxRows: 24 }"
+            />
+            <n-space justify="end">
+              <n-button @click="stateLockEditorVisible = false">取消</n-button>
+              <n-button type="primary" :loading="stateLocksLoading" @click="saveStateLockEdit">保存新版本</n-button>
+            </n-space>
+          </n-space>
+        </n-modal>
       </n-space>
     </n-scrollbar>
   </div>
@@ -269,6 +467,7 @@
 
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useMessage } from 'naive-ui'
 import { useWorkbenchRefreshStore } from '../../stores/workbenchRefreshStore'
@@ -278,6 +477,8 @@ import { knowledgeApi } from '../../api/knowledge'
 import type { ChapterSummary } from '../../api/knowledge'
 import { bibleApi, type CharacterDTO } from '../../api/bible'
 import { chapterFusionApi, type FusionJobDTO } from '../../api/chapterFusion'
+import { stateLocksApi, type StateLockSnapshotDTO, type StateLockGroupDTO } from '../../api/stateLocks'
+import { validationReportsApi, type ValidationIssueDTO, type ValidationReportDetailDTO } from '../../api/validationReports'
 import { beatSheetApi, type BeatSheetDTO } from '../../api/beatSheet'
 import type { AutopilotChapterAudit } from './ChapterStatusPanel.vue'
 
@@ -300,9 +501,20 @@ const chapterPlan = ref<StoryNode | null>(null)
 const knowledgeChapter = ref<ChapterSummary | null>(null)
 const beatSheet = ref<BeatSheetDTO | null>(null)
 const fusionJob = ref<FusionJobDTO | null>(null)
+const stateLocks = ref<StateLockSnapshotDTO | null>(null)
+const validationReport = ref<ValidationReportDetailDTO | null>(null)
 const fusionLoading = ref(false)
+const stateLocksLoading = ref(false)
+const validationLoading = ref(false)
+const issueActionLoading = ref(false)
 const fusionModalVisible = ref(false)
-const fusionPollTimer = ref<ReturnType<typeof setInterval> | null>(null)
+const stateLockEditorVisible = ref(false)
+const fusionPollTimer = ref<number | null>(null)
+const stateLockEditorJson = ref('')
+const stateLockChangeReason = ref('')
+const activeLockGroup = ref('')
+const repairPatchByIssueId = ref<Record<string, string>>({})
+const router = useRouter()
 
 // Bible 数据用于 ID -> name 映射
 const bibleCharacters = ref<CharacterDTO[]>([])
@@ -379,7 +591,37 @@ const fusionRequest = computed(() => {
 
 const fusionDraft = computed(() => fusionJob.value?.fusion_draft ?? null)
 const fusionState = computed(() => fusionJob.value?.status ?? 'idle')
+const currentStateLockVersion = computed(() => stateLocks.value?.version ?? null)
+const fusionUsesOutdatedStateLock = computed(() => {
+  if (!fusionDraft.value || !currentStateLockVersion.value) return false
+  return fusionDraft.value.state_lock_version < currentStateLockVersion.value
+})
+const validationIssueGroups = computed(() => {
+  const levels: Array<'P0' | 'P1' | 'P2'> = ['P0', 'P1', 'P2']
+  return levels.map(severity => ({
+    severity,
+    issues: (validationReport.value?.issues_by_severity?.[severity] ?? []) as ValidationIssueDTO[],
+  }))
+})
+const stateLockGroups = computed(() => {
+  if (!stateLocks.value) return []
+  return [
+    ['time_lock', '时间锁'],
+    ['location_lock', '地点锁'],
+    ['character_lock', '人物锁'],
+    ['item_lock', '道具锁'],
+    ['numeric_lock', '数值锁'],
+    ['event_lock', '事件锁'],
+    ['ending_lock', '终态锁'],
+  ].map(([key, label]) => ({
+    key,
+    label,
+    group: stateLocks.value?.[key as keyof StateLockSnapshotDTO] as StateLockGroupDTO,
+  }))
+})
 const fusionConstraintState = computed(() => {
+  const endingGroup = stateLocks.value?.ending_lock?.entries ?? []
+  if (endingGroup.length) return String(endingGroup[0].value ?? '未提供')
   if (knowledgeChapter.value?.ending_state?.trim()) return knowledgeChapter.value.ending_state.trim()
   if (chapterPlan.value?.timeline_end?.trim()) return chapterPlan.value.timeline_end.trim()
   if (chapterPlan.value?.title?.trim()) return chapterPlan.value.title.trim()
@@ -389,6 +631,7 @@ const fusionInputWarnings = computed(() => {
   const warnings: string[] = []
   if (!beatSheet.value?.scenes?.length) warnings.push('当前尚未落库真实节拍表，提交前会先尝试自动生成。')
   if (!beatLines.value.length) warnings.push('未检出明确节拍文本，本次融合将主要依赖章节大纲与生成后的节拍表。')
+  if (!stateLocks.value) warnings.push('当前章节尚未生成状态锁，融合前必须先生成。')
   return warnings
 })
 const fusionWarningLines = computed(() => fusionDraft.value?.warnings?.length ? fusionDraft.value.warnings : fusionInputWarnings.value)
@@ -438,9 +681,11 @@ async function loadFusionJob(fusionJobId: string) {
     } else {
       clearFusionPoll()
     }
+    await loadLatestValidationReport()
   } catch {
     fusionJob.value = null
     clearFusionPoll()
+    validationReport.value = null
   } finally {
     fusionLoading.value = false
   }
@@ -450,10 +695,35 @@ async function loadLatestFusionJob() {
   const jobId = loadStoredFusionJobId()
   if (!jobId) {
     fusionJob.value = null
+    validationReport.value = null
     clearFusionPoll()
     return
   }
   await loadFusionJob(jobId)
+}
+
+async function loadLatestValidationReport() {
+  const chapterId = fusionChapterId.value
+  const draft = fusionDraft.value
+  if (!chapterId || !draft) {
+    validationReport.value = null
+    return
+  }
+  validationLoading.value = true
+  try {
+    if (draft.latest_validation_report_id) {
+      validationReport.value = await validationReportsApi.getValidationReport(draft.latest_validation_report_id)
+      return
+    }
+    validationReport.value = await validationReportsApi.getLatestValidationReport(chapterId, {
+      draftType: 'fusion',
+      draftId: draft.fusion_id,
+    })
+  } catch {
+    validationReport.value = null
+  } finally {
+    validationLoading.value = false
+  }
 }
 
 function getBeatSheetOutline(): string {
@@ -511,11 +781,15 @@ async function createFusionJob() {
   const chapterNumber = props.currentChapterNumber
   const chapterId = fusionChapterId.value
   if (!props.slug || !chapterNumber || !chapterId) return
+  if (!stateLocks.value) {
+    message.error('请先生成状态锁，再启动融合')
+    return
+  }
   fusionLoading.value = true
   try {
     const ensuredBeatSheet = await ensureBeatSheet()
     const planVersion = Number((chapterPlan.value?.metadata as Record<string, unknown> | undefined)?.version ?? 1)
-    const stateLockVersion = Number((chapterPlan.value?.metadata as Record<string, unknown> | undefined)?.state_lock_version ?? 1)
+    const stateLockVersion = stateLocks.value.version
     const drafts = buildFusionBeatDrafts(ensuredBeatSheet ?? beatSheet.value)
     const targetWords = fusionRequest.value.target_words
     const beatIds = drafts.map(item => item.id)
@@ -540,6 +814,172 @@ async function createFusionJob() {
     message.error(detail ? `创建融合任务失败：${detail}` : '创建融合任务失败')
   } finally {
     fusionLoading.value = false
+  }
+}
+
+async function startValidation() {
+  const chapterId = fusionChapterId.value
+  const draft = fusionDraft.value
+  if (!chapterId || !draft) {
+    message.error('请先生成融合稿')
+    return
+  }
+  validationLoading.value = true
+  try {
+    const summary = await validationReportsApi.startValidation(chapterId, {
+      draft_type: 'fusion',
+      draft_id: draft.fusion_id,
+      plan_version: draft.plan_version,
+      state_lock_version: draft.state_lock_version,
+    })
+    validationReport.value = await validationReportsApi.getValidationReport(summary.report_id)
+    message.success(summary.passed ? '校验已通过' : '校验完成，存在阻断问题')
+    await loadLatestFusionJob()
+  } catch (error) {
+    const detail = getApiErrorMessage(error) || (error instanceof Error ? error.message : '')
+    message.error(detail ? `启动校验失败：${detail}` : '启动校验失败')
+  } finally {
+    validationLoading.value = false
+  }
+}
+
+async function updateIssueStatus(issue: ValidationIssueDTO, status: 'unresolved' | 'resolved' | 'ignored') {
+  issueActionLoading.value = true
+  try {
+    const updated = await validationReportsApi.updateValidationIssue(issue.issue_id, status)
+    for (const group of Object.values(validationReport.value?.issues_by_severity ?? {})) {
+      const items = group as ValidationIssueDTO[]
+      const index = items.findIndex(item => item.issue_id === updated.issue_id)
+      if (index >= 0) {
+        items[index] = updated
+      }
+    }
+    message.success('问题状态已更新')
+    await loadLatestValidationReport()
+  } catch (error) {
+    const detail = getApiErrorMessage(error) || (error instanceof Error ? error.message : '')
+    message.error(detail ? `更新问题状态失败：${detail}` : '更新问题状态失败')
+  } finally {
+    issueActionLoading.value = false
+  }
+}
+
+async function requestRepairPatch(issue: ValidationIssueDTO) {
+  issueActionLoading.value = true
+  try {
+    const patch = await validationReportsApi.buildRepairPatch(issue.issue_id)
+    repairPatchByIssueId.value = {
+      ...repairPatchByIssueId.value,
+      [issue.issue_id]: patch.patch_text,
+    }
+    message.success(patch.source === 'llm' ? '已生成修复建议' : '已生成启发式修复建议')
+  } catch (error) {
+    const detail = getApiErrorMessage(error) || (error instanceof Error ? error.message : '')
+    message.error(detail ? `生成修复建议失败：${detail}` : '生成修复建议失败')
+  } finally {
+    issueActionLoading.value = false
+  }
+}
+
+function openValidationCenter() {
+  router.push(`/book/${props.slug}/validation-center`)
+}
+
+function lockStatusTagType(status: string): 'success' | 'warning' | 'error' | 'info' | 'default' {
+  if (status === 'violated') return 'error'
+  if (status === 'manually_modified') return 'warning'
+  return 'success'
+}
+
+function formatLockValue(value: unknown): string {
+  if (Array.isArray(value)) return value.join('、')
+  if (value && typeof value === 'object') return JSON.stringify(value)
+  return String(value ?? '—')
+}
+
+function jumpToLockGroup(groupKey: string) {
+  if (!groupKey) return
+  activeLockGroup.value = groupKey
+  document.getElementById(`state-lock-group-${groupKey}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  window.setTimeout(() => {
+    if (activeLockGroup.value === groupKey) activeLockGroup.value = ''
+  }, 2200)
+}
+
+async function loadStateLocks() {
+  stateLocks.value = null
+  const chapterId = fusionChapterId.value
+  if (!chapterId) return
+  try {
+    stateLocks.value = await stateLocksApi.getCurrentStateLocks(chapterId)
+  } catch {
+    stateLocks.value = null
+  }
+}
+
+async function generateStateLocks() {
+  const chapterId = fusionChapterId.value
+  if (!chapterId) return
+  stateLocksLoading.value = true
+  try {
+    const planVersion = Number((chapterPlan.value?.metadata as Record<string, unknown> | undefined)?.version ?? 1)
+    stateLocks.value = await stateLocksApi.generateStateLocks(chapterId, planVersion)
+    message.success('状态锁已生成')
+  } catch (error) {
+    const detail = getApiErrorMessage(error) || (error instanceof Error ? error.message : '')
+    message.error(detail ? `生成状态锁失败：${detail}` : '生成状态锁失败')
+  } finally {
+    stateLocksLoading.value = false
+  }
+}
+
+function openStateLockEditor() {
+  if (!stateLocks.value) return
+  stateLockEditorJson.value = JSON.stringify({
+    time_lock: stateLocks.value.time_lock,
+    location_lock: stateLocks.value.location_lock,
+    character_lock: stateLocks.value.character_lock,
+    item_lock: stateLocks.value.item_lock,
+    numeric_lock: stateLocks.value.numeric_lock,
+    event_lock: stateLocks.value.event_lock,
+    ending_lock: stateLocks.value.ending_lock,
+  }, null, 2)
+  stateLockChangeReason.value = ''
+  stateLockEditorVisible.value = true
+}
+
+async function saveStateLockEdit() {
+  if (!stateLocks.value) return
+  let parsed: Omit<StateLockSnapshotDTO, 'state_lock_id' | 'chapter_id' | 'version' | 'plan_version' | 'source' | 'change_reason' | 'changed_fields' | 'inference_notes' | 'critical_change'> | null = null
+  try {
+    parsed = JSON.parse(stateLockEditorJson.value)
+  } catch {
+    message.error('状态锁 JSON 格式无效')
+    return
+  }
+  if (!stateLockChangeReason.value.trim()) {
+    message.error('请填写修改原因')
+    return
+  }
+  stateLocksLoading.value = true
+  try {
+    stateLocks.value = await stateLocksApi.updateStateLocks(stateLocks.value.state_lock_id, {
+      change_reason: stateLockChangeReason.value.trim(),
+      time_lock: parsed?.time_lock ?? { entries: [] },
+      location_lock: parsed?.location_lock ?? { entries: [] },
+      character_lock: parsed?.character_lock ?? { entries: [] },
+      item_lock: parsed?.item_lock ?? { entries: [] },
+      numeric_lock: parsed?.numeric_lock ?? { entries: [] },
+      event_lock: parsed?.event_lock ?? { entries: [] },
+      ending_lock: parsed?.ending_lock ?? { entries: [] },
+    })
+    stateLockEditorVisible.value = false
+    message.success('状态锁已保存为新版本')
+  } catch (error) {
+    const detail = getApiErrorMessage(error) || (error instanceof Error ? error.message : '')
+    message.error(detail ? `保存状态锁失败：${detail}` : '保存状态锁失败')
+  } finally {
+    stateLocksLoading.value = false
   }
 }
 
@@ -655,7 +1095,9 @@ async function refreshChapterData() {
   await Promise.all([
     loadKnowledgeChapter(),
     loadBeatSheet(),
+    loadStateLocks(),
   ])
+  await loadLatestValidationReport()
 }
 
 // 加载 Bible 数据用于名称映射
@@ -774,6 +1216,30 @@ onUnmounted(() => clearFusionPoll())
 .fusion-card {
   border-color: rgba(14, 165, 233, 0.16);
   background: linear-gradient(180deg, rgba(14, 165, 233, 0.03) 0%, rgba(99, 102, 241, 0.02) 100%);
+}
+
+.validation-card {
+  border-color: rgba(239, 68, 68, 0.16);
+  background: linear-gradient(180deg, rgba(239, 68, 68, 0.03) 0%, rgba(251, 191, 36, 0.02) 100%);
+}
+
+.state-lock-card {
+  border-color: rgba(249, 115, 22, 0.18);
+  background: linear-gradient(180deg, rgba(249, 115, 22, 0.035) 0%, rgba(245, 158, 11, 0.02) 100%);
+}
+
+.state-lock-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scroll-margin-top: 24px;
+}
+
+.state-lock-group-active {
+  padding: 8px;
+  border-radius: 12px;
+  background: rgba(245, 158, 11, 0.08);
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.24);
 }
 
 .fusion-diff-grid {
