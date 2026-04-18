@@ -93,6 +93,7 @@ async def test_handle_writing_persists_word_control_metrics(action: str):
     )
     daemon._get_existing_chapter_content = AsyncMock(return_value="")
     daemon._stream_llm_with_stop_watch = AsyncMock(return_value="原始正文")
+    daemon._maybe_rewrite_next_chapter_outline = AsyncMock(return_value=None)
 
     novel = _build_novel()
 
@@ -110,6 +111,239 @@ async def test_handle_writing_persists_word_control_metrics(action: str):
     assert upsert_args[2]["within_tolerance"] is True
     assert novel.current_stage == NovelStage.AUDITING
     assert novel.current_auto_chapters == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_writing_stops_autopilot_when_outline_rewrite_exhausted():
+    """下一章大纲重写连续失败时，应退出托管而不是继续进入下一章。"""
+    chapter_repository = Mock()
+    chapter_repository.get_by_novel_and_number.return_value = None
+    novel_repository = Mock()
+    workflow = _build_workflow("expand")
+
+    daemon = AutopilotDaemon(
+        novel_repository=novel_repository,
+        llm_service=Mock(),
+        context_builder=None,
+        background_task_service=Mock(),
+        planning_service=Mock(),
+        story_node_repo=Mock(),
+        chapter_repository=chapter_repository,
+        chapter_workflow=workflow,
+    )
+
+    daemon._is_still_running = Mock(return_value=True)
+    daemon._flush_novel = Mock()
+    daemon._find_next_unwritten_chapter_async = AsyncMock(
+        return_value=SimpleNamespace(
+            id="chapter-node-1",
+            number=1,
+            title="第一章",
+            outline="章节大纲",
+            description="",
+        )
+    )
+    daemon._get_existing_chapter_content = AsyncMock(return_value="")
+    daemon._stream_llm_with_stop_watch = AsyncMock(return_value="原始正文")
+    daemon._maybe_rewrite_next_chapter_outline = AsyncMock(
+        side_effect=RuntimeError("自动重写大纲连续失败: API returned no text content")
+    )
+
+    novel = _build_novel()
+
+    await daemon._handle_writing(novel)
+
+    assert novel.autopilot_status == AutopilotStatus.STOPPED
+    novel_repository.save.assert_called_once_with(novel)
+    daemon._maybe_rewrite_next_chapter_outline.assert_awaited_once()
+    assert novel.current_stage == NovelStage.WRITING
+    assert novel.current_auto_chapters == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_auditing_retries_quality_gate_before_stopping():
+    chapter_repository = Mock()
+    chapter_repository.list_by_novel.return_value = [
+        Mock(number=1, status=Mock(value="completed"), id="chapter-1", content="旧正文"),
+    ]
+    aftermath_pipeline = Mock()
+    aftermath_pipeline.run_after_chapter_saved = AsyncMock(side_effect=[
+        {
+            "drift_alert": False,
+            "similarity_score": 0.9,
+            "narrative_sync_ok": False,
+            "quality_gate_passed": False,
+        },
+        {
+            "drift_alert": False,
+            "similarity_score": 0.92,
+            "narrative_sync_ok": True,
+            "quality_gate_passed": True,
+        },
+    ])
+    aftermath_pipeline._run_quality_gate = AsyncMock(
+        return_value={
+            "quality_gate_passed": True,
+            "quality_gate_mode": "retry",
+            "quality_gate_step": "pass",
+            "quality_gate_reason": "",
+            "quality_gate_blockers": [],
+            "state_lock_version": 2,
+            "fusion_id": "fd-1",
+            "validation_report_id": "vr-1",
+            "validation_status": "completed",
+        }
+    )
+
+    daemon = AutopilotDaemon(
+        novel_repository=Mock(),
+        llm_service=Mock(),
+        context_builder=None,
+        background_task_service=Mock(),
+        planning_service=Mock(),
+        story_node_repo=Mock(),
+        chapter_repository=chapter_repository,
+        aftermath_pipeline=aftermath_pipeline,
+    )
+
+    daemon._is_still_running = Mock(return_value=True)
+    daemon._score_voice_only = AsyncMock(return_value={"drift_alert": False, "similarity_score": 0.9})
+    daemon._apply_voice_rewrite_loop = AsyncMock(return_value=("旧正文", {"drift_alert": False, "similarity_score": 0.9}))
+    daemon._auto_trigger_macro_diagnosis = AsyncMock()
+    daemon._maybe_generate_summaries = AsyncMock()
+
+    novel = _build_novel()
+    novel.current_stage = NovelStage.AUDITING
+
+    await daemon._handle_auditing(novel)
+
+    assert aftermath_pipeline.run_after_chapter_saved.await_count == 2
+    aftermath_pipeline._run_quality_gate.assert_awaited_once()
+    daemon._auto_trigger_macro_diagnosis.assert_awaited_once()
+    daemon._maybe_generate_summaries.assert_awaited_once()
+    assert novel.autopilot_status == AutopilotStatus.RUNNING
+    assert novel.current_stage == NovelStage.WRITING
+    assert novel.last_audit_narrative_ok is True
+
+
+@pytest.mark.asyncio
+async def test_handle_auditing_stops_when_quality_gate_retry_fails():
+    chapter_repository = Mock()
+    chapter_repository.list_by_novel.return_value = [
+        Mock(number=1, status=Mock(value="completed"), id="chapter-1", content="旧正文"),
+    ]
+    aftermath_pipeline = Mock()
+    aftermath_pipeline.run_after_chapter_saved = AsyncMock(
+        return_value={
+            "drift_alert": False,
+            "similarity_score": 0.9,
+            "narrative_sync_ok": False,
+            "quality_gate_passed": False,
+        }
+    )
+    aftermath_pipeline._run_quality_gate = AsyncMock(
+        return_value={
+            "quality_gate_passed": False,
+            "quality_gate_mode": "retry",
+            "quality_gate_step": "validation",
+            "quality_gate_reason": "Validation 仍有 1 个阻断问题",
+            "quality_gate_blockers": ["Validation 仍有 1 个阻断问题"],
+            "state_lock_version": 2,
+            "fusion_id": "fd-1",
+            "validation_report_id": "vr-1",
+            "validation_status": "failed",
+        }
+    )
+
+    daemon = AutopilotDaemon(
+        novel_repository=Mock(),
+        llm_service=Mock(),
+        context_builder=None,
+        background_task_service=Mock(),
+        planning_service=Mock(),
+        story_node_repo=Mock(),
+        chapter_repository=chapter_repository,
+        aftermath_pipeline=aftermath_pipeline,
+    )
+
+    daemon._is_still_running = Mock(return_value=True)
+    daemon._score_voice_only = AsyncMock(return_value={"drift_alert": False, "similarity_score": 0.9})
+    daemon._apply_voice_rewrite_loop = AsyncMock(return_value=("旧正文", {"drift_alert": False, "similarity_score": 0.9}))
+    daemon._auto_trigger_macro_diagnosis = AsyncMock()
+    daemon._maybe_generate_summaries = AsyncMock()
+
+    novel = _build_novel()
+    novel.current_stage = NovelStage.AUDITING
+
+    await daemon._handle_auditing(novel)
+
+    aftermath_pipeline.run_after_chapter_saved.assert_awaited_once()
+    aftermath_pipeline._run_quality_gate.assert_awaited_once()
+    daemon._auto_trigger_macro_diagnosis.assert_not_awaited()
+    daemon._maybe_generate_summaries.assert_not_awaited()
+    assert novel.autopilot_status == AutopilotStatus.STOPPED
+    assert novel.current_stage == NovelStage.AUDITING
+    assert novel.last_audit_narrative_ok is False
+
+
+@pytest.mark.asyncio
+async def test_maybe_rewrite_next_chapter_outline_syncs_title_and_description():
+    """重写下一章大纲时，应同步更新标题与描述。"""
+    story_node_repo = Mock()
+    story_node_repo.update = AsyncMock()
+    daemon = AutopilotDaemon(
+        novel_repository=Mock(),
+        llm_service=Mock(),
+        context_builder=None,
+        background_task_service=Mock(),
+        planning_service=Mock(),
+        story_node_repo=story_node_repo,
+        chapter_repository=Mock(),
+    )
+
+    next_node = SimpleNamespace(
+        id="chapter-node-2",
+        number=2,
+        title="旧标题",
+        outline="旧大纲",
+        description="旧描述",
+        metadata={},
+    )
+    seam = {
+        "ending_state": "主角冲进密室",
+        "ending_emotion": "紧张",
+        "carry_over_question": "密室里到底有什么",
+        "next_opening_hint": "密室内部会有机关",
+    }
+
+    daemon._find_chapter_node_after = AsyncMock(return_value=next_node)
+    daemon._build_chapter_seam_snapshot = Mock(return_value=seam)
+    daemon._outline_conflicts_with_previous_seam = Mock(return_value=(True, "测试冲突"))
+    daemon._rewrite_next_chapter_outline = AsyncMock(
+        return_value={
+            "outline": "主角进入密室后发现墙壁机关，必须先破解机关才能继续前进。",
+            "title": "密室机关",
+            "description": "主角在密室中破解机关。",
+        }
+    )
+
+    novel = _build_novel()
+    current_chapter = SimpleNamespace(number=1)
+
+    await daemon._maybe_rewrite_next_chapter_outline(
+        novel=novel,
+        current_chapter_node=current_chapter,
+        current_outline="当前章大纲",
+        current_content="当前章内容",
+    )
+
+    assert next_node.outline == "主角进入密室后发现墙壁机关，必须先破解机关才能继续前进。"
+    assert next_node.title == "密室机关"
+    assert next_node.description == "主角在密室中破解机关。"
+    assert next_node.metadata["auto_replanned_title"] == "密室机关"
+    assert next_node.metadata["auto_replanned_outline"] == next_node.outline
+    assert next_node.metadata["auto_replanned_description"] == next_node.description
+    story_node_repo.update.assert_awaited_once_with(next_node)
 
 
 def test_get_latest_completed_chapter_prefers_highest_number():

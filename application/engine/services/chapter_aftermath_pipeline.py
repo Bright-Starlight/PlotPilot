@@ -1,10 +1,11 @@
-"""章节保存后的统一管线：叙事落库、向量检索、文风、图谱推断与后台抽取。
+"""章节保存后的统一管线：质量门禁、叙事落库、向量检索、文风、图谱推断与后台抽取。
 
 供 HTTP 保存、托管连写、自动驾驶审计复用，避免：
 - 索引用正文截断 vs 叙事层用 LLM 总结 两套逻辑；
 - 文风既入队 VOICE_ANALYSIS 又同步 score_chapter 重复计算。
 
 顺序（重要产物均落库）：
+0. 质量门禁：State Locks -> 融合草稿 -> Validation，全部通过后才继续
 1. 分章叙事同步：一次 LLM 产出摘要/事件/埋线 + 三元组 + 伏笔 → StoryKnowledge + triples + ForeshadowingRegistry，再向量索引（chapter_narrative_sync）
 2. 文风评分：写入 chapter_style_scores（仅一次，不再入队 VOICE_ANALYSIS）
 3. 结构树知识图谱推断：KnowledgeGraphService.infer_from_chapter（与 LLM 三元组互补，非重复）
@@ -18,6 +19,9 @@ from domain.ai.services.llm_service import LLMService
 
 if TYPE_CHECKING:
     from application.world.services.knowledge_service import KnowledgeService
+    from application.core.services.chapter_fusion_service import ChapterFusionService
+    from application.core.services.state_lock_service import StateLockService
+    from domain.novel.repositories.novel_repository import NovelRepository
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,9 @@ class ChapterAftermathPipeline:
         chapter_repository: Any = None,
         plot_arc_repository: Any = None,
         narrative_event_repository: Any = None,
+        novel_repository: Any = None,
+        state_lock_service: "StateLockService | None" = None,
+        chapter_fusion_service: "ChapterFusionService | None" = None,
     ) -> None:
         self._knowledge = knowledge_service
         self._indexing = chapter_indexing_service
@@ -77,12 +84,18 @@ class ChapterAftermathPipeline:
         self._chapter_repository = chapter_repository
         self._plot_arc_repository = plot_arc_repository
         self._narrative_event_repository = narrative_event_repository
+        self._novel_repository = novel_repository
+        self._state_lock_service = state_lock_service
+        self._chapter_fusion_service = chapter_fusion_service
 
     async def run_after_chapter_saved(
         self,
         novel_id: str,
         chapter_number: int,
         content: str,
+        *,
+        run_quality_gate: bool = False,
+        quality_gate_mode: str = "full",
     ) -> Dict[str, Any]:
         """保存正文后执行完整管线。返回文风结果供托管/审计门控使用。
 
@@ -92,11 +105,30 @@ class ChapterAftermathPipeline:
             "drift_alert": False,
             "similarity_score": None,
             "narrative_sync_ok": False,
+            "quality_gate_passed": True,
         }
 
         if not content or not str(content).strip():
             logger.debug("aftermath 跳过：正文为空 novel=%s ch=%s", novel_id, chapter_number)
             return out
+
+        if run_quality_gate:
+            gate_result = await self._run_quality_gate(
+                novel_id,
+                chapter_number,
+                content,
+                quality_gate_mode=quality_gate_mode,
+            )
+            out.update(gate_result)
+            if not gate_result.get("quality_gate_passed", True):
+                logger.warning(
+                    "aftercare gate blocked novel=%s ch=%s step=%s reason=%s",
+                    novel_id,
+                    chapter_number,
+                    gate_result.get("quality_gate_step", "unknown"),
+                    gate_result.get("quality_gate_reason", "quality gate failed"),
+                )
+                return out
 
         # 1) 叙事 + 向量 + 故事线 + 张力 + 对话（与 chapter_narrative_sync 一致）
         try:
@@ -158,3 +190,241 @@ class ChapterAftermathPipeline:
         await infer_kg_from_chapter(novel_id, chapter_number)
 
         return out
+
+    async def _run_quality_gate(
+        self,
+        novel_id: str,
+        chapter_number: int,
+        content: str,
+        *,
+        quality_gate_mode: str = "full",
+    ) -> Dict[str, Any]:
+        """按门禁模式执行最终质量门禁。
+
+        full: State Locks -> 融合草稿 -> Validation
+        retry: 融合草稿 -> Validation（复用当前 State Locks 版本，不再重新生成）
+        """
+        result: Dict[str, Any] = {
+            "quality_gate_passed": True,
+            "quality_gate_step": "pass",
+            "quality_gate_reason": "",
+            "quality_gate_blockers": [],
+            "state_lock_version": None,
+            "fusion_id": "",
+            "validation_report_id": "",
+            "quality_gate_mode": quality_gate_mode,
+        }
+
+        if self._state_lock_service is None and self._chapter_fusion_service is None:
+            return result
+
+        chapter = self._resolve_chapter(novel_id, chapter_number)
+        if chapter is None:
+            result.update(
+                {
+                    "quality_gate_passed": False,
+                    "quality_gate_step": "chapter_lookup",
+                    "quality_gate_reason": "Chapter not found for quality gate",
+                    "quality_gate_blockers": ["章节不存在，无法执行质量门禁"],
+                }
+            )
+            return result
+
+        if quality_gate_mode not in {"full", "retry"}:
+            result.update(
+                {
+                    "quality_gate_passed": False,
+                    "quality_gate_step": "gate_mode",
+                    "quality_gate_reason": f"Unsupported quality gate mode: {quality_gate_mode}",
+                    "quality_gate_blockers": [f"Unsupported quality gate mode: {quality_gate_mode}"],
+                }
+            )
+            return result
+
+        if quality_gate_mode == "full" and self._state_lock_service is not None:
+            try:
+                snapshot = await self._state_lock_service.generate_state_locks(chapter.id)
+                result["state_lock_version"] = int(getattr(snapshot, "version", 0) or 0)
+                result["plan_version"] = int(getattr(snapshot, "plan_version", 0) or 0)
+            except Exception as exc:
+                result.update(
+                    {
+                        "quality_gate_passed": False,
+                        "quality_gate_step": "state_locks",
+                        "quality_gate_reason": str(exc),
+                        "quality_gate_blockers": [f"State Locks 生成失败: {exc}"],
+                    }
+                )
+                return result
+        if quality_gate_mode == "retry":
+            if self._chapter_fusion_service is None:
+                result.update(
+                    {
+                        "quality_gate_passed": False,
+                        "quality_gate_step": "validation",
+                        "quality_gate_reason": "Chapter fusion service is unavailable",
+                        "quality_gate_blockers": ["融合草稿不可用，无法执行重试"],
+                    }
+                )
+                return result
+
+            draft = self._chapter_fusion_service.fusion_repository.get_latest_draft_for_chapter(chapter.id)
+            if draft is None:
+                result.update(
+                    {
+                        "quality_gate_passed": False,
+                        "quality_gate_step": "validation",
+                        "quality_gate_reason": "No fusion draft is available for retry",
+                        "quality_gate_blockers": ["没有可用于重试的融合草稿"],
+                    }
+                )
+                return result
+
+            result["state_lock_version"] = int(getattr(draft, "state_lock_version", 0) or 0)
+            result["plan_version"] = int(getattr(draft, "plan_version", 0) or 0)
+            result["fusion_id"] = getattr(draft, "fusion_id", "") or ""
+            if result["state_lock_version"] <= 0:
+                result.update(
+                    {
+                        "quality_gate_passed": False,
+                        "quality_gate_step": "validation",
+                        "quality_gate_reason": "Fusion draft is missing a valid state_lock_version",
+                        "quality_gate_blockers": ["融合草稿缺少有效的 state_lock_version"],
+                    }
+                )
+                return result
+
+        if quality_gate_mode == "full" and self._chapter_fusion_service is not None:
+            try:
+                beat_sheet_repo = getattr(self._chapter_fusion_service, "beat_sheet_repository", None)
+                beat_sheet = await beat_sheet_repo.get_by_chapter_id(chapter.id) if beat_sheet_repo else None
+                if beat_sheet is None or not getattr(beat_sheet, "scenes", None):
+                    raise ValueError("Beat sheet not found")
+
+                beat_ids = [f"{chapter.id}-beat-{index + 1}" for index, _ in enumerate(beat_sheet.scenes)]
+                target_words = self._resolve_target_words(novel_id)
+                suspense_budget = {"primary": 0, "secondary": 0}
+                state_lock_version = int(result.get("state_lock_version") or getattr(beat_sheet, "state_lock_version", 0) or 0)
+                if state_lock_version <= 0:
+                    raise ValueError("State lock version is required before fusion")
+
+                job = self._chapter_fusion_service.create_job(
+                    chapter_id=chapter.id,
+                    plan_version=int(result.get("plan_version") or getattr(beat_sheet, "plan_version", 0) or 0),
+                    state_lock_version=state_lock_version,
+                    beat_ids=beat_ids,
+                    target_words=target_words,
+                    suspense_budget=suspense_budget,
+                )
+                job = await self._chapter_fusion_service.run_job(job.fusion_job_id)
+                draft = getattr(job, "fusion_draft", None)
+                if draft is None:
+                    raise ValueError("Fusion draft was not created")
+
+                result["fusion_id"] = draft.fusion_id
+                result["fusion_job_id"] = job.fusion_job_id
+                result["fusion_status"] = job.status
+
+                validation_service = getattr(self._chapter_fusion_service, "validation_service", None)
+                if validation_service is not None:
+                    report_id = getattr(draft, "latest_validation_report_id", "") or ""
+                    report = None
+                    if report_id:
+                        report = validation_service.get_report(report_id)
+                    else:
+                        report = await validation_service.auto_validate_fusion_draft(chapter.id, draft.fusion_id)
+                        report_id = report.report_id
+                    result["validation_report_id"] = report_id
+                    result["validation_status"] = getattr(report, "status", "")
+                    blocking_count = int(getattr(report, "blocking_issue_count", 0) or 0)
+                    if blocking_count > 0:
+                        result.update(
+                            {
+                                "quality_gate_passed": False,
+                                "quality_gate_step": "validation",
+                                "quality_gate_reason": f"{blocking_count} blocking issue(s) remain",
+                                "quality_gate_blockers": [f"Validation 仍有 {blocking_count} 个阻断问题"],
+                            }
+                        )
+                        return result
+                else:
+                    result["validation_status"] = "skipped"
+            except Exception as exc:
+                result.update(
+                    {
+                        "quality_gate_passed": False,
+                        "quality_gate_step": "fusion",
+                        "quality_gate_reason": str(exc),
+                        "quality_gate_blockers": [f"融合草稿生成失败: {exc}"],
+                    }
+                )
+                return result
+        elif quality_gate_mode == "retry":
+            validation_service = getattr(self._chapter_fusion_service, "validation_service", None)
+            if validation_service is None:
+                result.update(
+                    {
+                        "quality_gate_passed": False,
+                        "quality_gate_step": "validation",
+                        "quality_gate_reason": "Validation service is unavailable",
+                        "quality_gate_blockers": ["校验服务不可用，无法执行重试"],
+                    }
+                )
+                return result
+
+            try:
+                report = await validation_service.auto_validate_fusion_draft(chapter.id, result["fusion_id"])
+                result["validation_report_id"] = report.report_id
+                result["validation_status"] = getattr(report, "status", "")
+                blocking_count = int(getattr(report, "blocking_issue_count", 0) or 0)
+                if blocking_count > 0:
+                    result.update(
+                        {
+                            "quality_gate_passed": False,
+                            "quality_gate_step": "validation",
+                            "quality_gate_reason": f"{blocking_count} blocking issue(s) remain",
+                            "quality_gate_blockers": [f"Validation 仍有 {blocking_count} 个阻断问题"],
+                        }
+                    )
+                    return result
+            except Exception as exc:
+                result.update(
+                    {
+                        "quality_gate_passed": False,
+                        "quality_gate_step": "validation",
+                        "quality_gate_reason": str(exc),
+                        "quality_gate_blockers": [f"Validation 重试失败: {exc}"],
+                    }
+                )
+                return result
+
+        return result
+
+    def _resolve_chapter(self, novel_id: str, chapter_number: int):
+        if self._chapter_repository is None:
+            return None
+        try:
+            from domain.novel.value_objects.novel_id import NovelId
+
+            chapter = None
+            if hasattr(self._chapter_repository, "get_by_novel_and_number"):
+                chapter = self._chapter_repository.get_by_novel_and_number(NovelId(novel_id), chapter_number)
+            if chapter is None and hasattr(self._chapter_repository, "list_by_novel"):
+                chapters = self._chapter_repository.list_by_novel(NovelId(novel_id)) or []
+                chapter = next((item for item in chapters if int(getattr(item, "number", 0) or 0) == int(chapter_number)), None)
+            return chapter
+        except Exception as exc:
+            logger.warning("quality gate chapter lookup failed novel=%s ch=%s: %s", novel_id, chapter_number, exc)
+            return None
+
+    def _resolve_target_words(self, novel_id: str) -> int:
+        if self._novel_repository is not None:
+            try:
+                from domain.novel.value_objects.novel_id import NovelId
+
+                novel = self._novel_repository.get_by_id(NovelId(novel_id))
+                if novel is not None:
+                    return int(getattr(novel, "target_words_per_chapter", 3500) or 3500)
+            except Exception as exc:
+                logger.debug("quality gate target words fallback novel=%s: %s", novel_id, exc)
+        return 3500

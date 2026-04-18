@@ -7,6 +7,7 @@
 4. 节拍级幂等：每写完一个节拍立刻落库，断点续写从 current_beat_index 恢复
 5. 熔断保护：连续失败 3 次挂起单本小说，全局熔断器防止 API 雪崩
 """
+import json
 import time
 import logging
 import asyncio
@@ -26,6 +27,7 @@ from application.workflows.auto_novel_generation_workflow import AutoNovelGenera
 from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
 from application.engine.services.style_constraint_builder import build_style_summary
 from application.engine.services.word_control_service import effective_length
+from application.ai.structured_json_pipeline import sanitize_llm_output, parse_and_repair_json
 from application.config import AppConfig
 from domain.novel.value_objects.chapter_id import ChapterId
 
@@ -958,7 +960,16 @@ class AutopilotDaemon:
                 e,
                 exc_info=True,
             )
-            raise  # 传播给外层 circuit breaker 处理
+            # 该类失败会让下一章直接跳过风险控制，因此这里改为退出托管，
+            # 由人工介入后再决定是否继续，而不是让外层循环继续写下一章。
+            novel.autopilot_status = AutopilotStatus.STOPPED
+            self.novel_repository.save(novel)
+            logger.error(
+                "[%s] 第 %s 章自动修正下一章大纲失败后已退出托管",
+                novel.novel_id,
+                chapter_num,
+            )
+            return
 
         # 8. 更新计数器，重置节拍索引
         novel.current_auto_chapters = (novel.current_auto_chapters or 0) + 1
@@ -1081,7 +1092,7 @@ class AutopilotDaemon:
         if not conflict:
             return
 
-        rewritten_outline = await self._rewrite_next_chapter_outline(
+        rewritten = await self._rewrite_next_chapter_outline(
             novel=novel,
             current_chapter_number=current_chapter_node.number,
             current_outline=current_outline,
@@ -1089,23 +1100,61 @@ class AutopilotDaemon:
             seam=seam,
             reason=reason,
         )
-        rewritten_outline = (rewritten_outline or "").strip()
+        rewritten = rewritten or {}
+        rewritten_outline = (rewritten.get("outline") or "").strip()
         if not rewritten_outline or rewritten_outline == original_outline:
             return
 
+        original_title = (next_chapter_node.title or "").strip()
+        rewritten_title = (rewritten.get("title") or "").strip()
+        rewritten_description = (rewritten.get("description") or "").strip()
+        inferred_title = self._derive_chapter_title_from_outline(
+            rewritten_outline,
+            fallback=original_title,
+        )
+
         next_chapter_node.outline = rewritten_outline
+        title_updated = False
+        description_updated = False
+        if rewritten_title:
+            candidate_title = rewritten_title
+        else:
+            candidate_title = inferred_title
+        if candidate_title and candidate_title != original_title:
+            next_chapter_node.title = candidate_title
+            title_updated = True
+
+        current_description = (getattr(next_chapter_node, "description", "") or "").strip()
+        if rewritten_description:
+            if rewritten_description != current_description:
+                next_chapter_node.description = rewritten_description
+                description_updated = True
+        elif not current_description or current_description in {original_outline, original_title}:
+            next_chapter_node.description = rewritten_outline
+            description_updated = True
+
         metadata = dict(getattr(next_chapter_node, "metadata", {}) or {})
         metadata["auto_replanned_from_chapter"] = current_chapter_node.number
         metadata["auto_replanned_reason"] = reason
         metadata["auto_replanned_at"] = datetime.now(timezone.utc).isoformat()
+        metadata["auto_replanned_title"] = next_chapter_node.title
+        metadata["auto_replanned_outline"] = rewritten_outline
+        if description_updated:
+            metadata["auto_replanned_description"] = next_chapter_node.description
+        if title_updated:
+            metadata["auto_replanned_title_updated"] = True
+        if description_updated:
+            metadata["auto_replanned_description_updated"] = True
         next_chapter_node.metadata = metadata
         await self.story_node_repo.update(next_chapter_node)
         logger.warning(
-            "[%s] 第 %s 章与第 %s 章大纲冲突，已自动重写下一章大纲：%s",
+            "[%s] 第 %s 章与第 %s 章大纲冲突，已自动重写下一章大纲：%s；title=%r description_updated=%s",
             novel.novel_id,
             current_chapter_node.number,
             next_chapter_node.number,
             reason,
+            next_chapter_node.title,
+            description_updated,
         )
 
     async def _find_chapter_node_after(self, novel_id: str, chapter_number: int):
@@ -1259,6 +1308,45 @@ class AutopilotDaemon:
                 carryover_hint_score += min(field_hits, 2)
         return score, carryover_hint_score
 
+    @staticmethod
+    def _derive_chapter_title_from_outline(outline: str, fallback: str = "") -> str:
+        """从大纲中提炼一个简短标题，避免标题与大纲长期脱节。"""
+        text = re.sub(r"<[^>]+>", " ", (outline or "").strip())
+        if not text:
+            return fallback
+
+        text = re.sub(r"^\s*第?\s*\d+\s*章[:：\s]*", "", text)
+        text = text.strip(" \"'“”‘’《》【】()（）[]")
+        for separator in ("。", "；", ";", "！", "!", "？", "?", "\n", "\r"):
+            if separator in text:
+                text = text.split(separator, 1)[0]
+                break
+
+        text = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", text).strip()
+        if not text:
+            return fallback
+
+        return text[:16]
+
+    @staticmethod
+    def _parse_outline_rewrite_payload(raw_text: str) -> Dict[str, str]:
+        """解析重写结果；兼容 JSON 与纯文本两种返回。"""
+        cleaned = sanitize_llm_output(raw_text or "")
+        if not cleaned:
+            return {}
+
+        data, _ = parse_and_repair_json(cleaned)
+        if isinstance(data, dict):
+            payload: Dict[str, str] = {}
+            for key in ("title", "outline", "description"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    payload[key] = value.strip()
+            if payload:
+                return payload
+
+        return {"outline": cleaned}
+
     def _extract_seam_keywords(self, text: str) -> List[str]:
         normalized = self._normalize_seam_text(text)
         if len(normalized) < 2:
@@ -1290,7 +1378,7 @@ class AutopilotDaemon:
         next_chapter_node,
         seam: Dict[str, str],
         reason: str,
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, str]]:
         if not self.llm_service:
             return None
 
@@ -1301,27 +1389,90 @@ class AutopilotDaemon:
             seam=seam,
             reason=reason,
         )
-        config = GenerationConfig(max_tokens=280, temperature=0.45)
+        config = GenerationConfig(max_tokens=512, temperature=0.35)
         last_error = None
+        prompt_preview = (prompt.user or "").replace("\n", " ")[:240]
+        current_outline_preview = (current_outline or "").replace("\n", " ")[:120]
+        next_outline_preview = (
+            next_chapter_node.outline
+            or next_chapter_node.description
+            or next_chapter_node.title
+            or ""
+        ).replace("\n", " ")[:120]
         for attempt in range(3):
             try:
                 result = await self.llm_service.generate(prompt, config)
-                return (result.content or "").strip()
+                payload = self._parse_outline_rewrite_payload(result.content or "")
+                rewritten_outline = (payload.get("outline") or "").strip()
+                if not rewritten_outline:
+                    logger.warning(
+                        "[%s] 自动重写第 %s 章大纲返回空文本（第 %s 次尝试）: "
+                        "max_tokens=%s temperature=%.2f prompt_chars=%s "
+                        "current_outline_preview=%r next_outline_preview=%r seam=%s",
+                        novel.novel_id,
+                        next_chapter_node.number,
+                        attempt + 1,
+                        config.max_tokens,
+                        config.temperature,
+                        len(prompt.user or ""),
+                        current_outline_preview,
+                        next_outline_preview,
+                        {
+                            "ending_state": seam.get("ending_state", ""),
+                            "ending_emotion": seam.get("ending_emotion", ""),
+                            "carry_over_question": seam.get("carry_over_question", ""),
+                            "next_opening_hint": seam.get("next_opening_hint", ""),
+                        },
+                    )
+                    raise RuntimeError("API returned no text content")
+                rewritten_title = (payload.get("title") or "").strip()
+                rewritten_description = (payload.get("description") or "").strip()
+                logger.debug(
+                    "[%s] 自动重写第 %s 章大纲成功: chars=%s title=%r prompt_preview=%r",
+                    novel.novel_id,
+                    next_chapter_node.number,
+                    len(rewritten_outline),
+                    rewritten_title,
+                    prompt_preview,
+                )
+                return {
+                    "outline": rewritten_outline,
+                    "title": rewritten_title,
+                    "description": rewritten_description,
+                }
             except Exception as e:
                 last_error = e
+                error_type = type(e).__name__
                 logger.warning(
-                    "[%s] 自动重写第 %s 章大纲失败（第 %s 次尝试）：%s",
+                    "[%s] 自动重写第 %s 章大纲失败（第 %s 次尝试）：%s: %s | "
+                    "max_tokens=%s temperature=%.2f prompt_chars=%s prompt_preview=%r "
+                    "current_outline_preview=%r next_outline_preview=%r seam=%s",
                     novel.novel_id,
                     next_chapter_node.number,
                     attempt + 1,
+                    error_type,
                     e,
+                    config.max_tokens,
+                    config.temperature,
+                    len(prompt.user or ""),
+                    prompt_preview,
+                    current_outline_preview,
+                    next_outline_preview,
+                    {
+                        "ending_state": seam.get("ending_state", ""),
+                        "ending_emotion": seam.get("ending_emotion", ""),
+                        "carry_over_question": seam.get("carry_over_question", ""),
+                        "next_opening_hint": seam.get("next_opening_hint", ""),
+                    },
                 )
                 if attempt < 2:
                     await asyncio.sleep(2 ** attempt)
         logger.error(
-            "[%s] 自动重写第 %s 章大纲连续 3 次失败，终止托管",
+            "[%s] 自动重写第 %s 章大纲连续 3 次失败，终止托管: %s (%s)",
             novel.novel_id,
             next_chapter_node.number,
+            type(last_error).__name__ if last_error else "UnknownError",
+            last_error,
         )
         raise RuntimeError(f"自动重写大纲连续失败: {last_error}")
 
@@ -1344,13 +1495,20 @@ class AutopilotDaemon:
 
 必须遵守：
 1. 以上一章已发生的事实为最高优先级，不得推翻。
-2. 只重写下一章大纲，不要重写正文，不要解释原因。
+2. 只重写下一章相关信息，不要重写正文，不要解释原因。
 3. 开头必须直接承接上一章结尾，不得另起“次日/清晨/突然收到新线索”式新开局，除非上一章结尾本身明确切到了那里。
 4. 尽量保留原下一章大纲里仍然兼容的主线目标，但可以调整入口场景、推进顺序和信息揭露时机。
-5. 只输出一段 100-180 字的中文章节大纲，不要加标题、序号、引号或说明。"""
+5. 若新大纲导致章节主题发生变化，请同步更新 title。
+6. 若适合，请同步给出一句更贴近新大纲的 description。
+7. 只输出一个 JSON 对象，不要 markdown，不要代码块，不要额外解释。
+8. JSON 结构为 {"title":"章节标题","outline":"100-180字大纲","description":"可选的简短章节说明"}。
+9. 不要输出推理过程或中间思考。"""
         user = f"""上一章：第 {current_chapter_number} 章
 上一章原大纲：
 {current_outline}
+
+原章节标题：
+{next_chapter_node.title}
 
 上一章接缝信息：
 - 章末状态：{seam.get("ending_state", "") or "无"}
@@ -1419,47 +1577,86 @@ class AutopilotDaemon:
                 )
 
         # 2. 统一章后管线：叙事/向量、文风（一次）、KG 推断；三元组与伏笔在叙事同步单次 LLM 中落库
+        # 注意：张力评分已在 aftermath_pipeline 的 sync_chapter_narrative_after_save 中完成，无需重复
         if self.aftermath_pipeline:
             try:
                 drift_result = await self.aftermath_pipeline.run_after_chapter_saved(
                     novel.novel_id.value,
                     chapter_num,
                     content,
+                    run_quality_gate=True,
                 )
                 logger.info(
                     f"[{novel.novel_id}] 章后管线完成: 相似度={drift_result.get('similarity_score')}, "
                     f"drift_alert={drift_result.get('drift_alert')}"
                 )
+
+                quality_gate_passed = bool(drift_result.get("quality_gate_passed", True))
+                if not quality_gate_passed:
+                    logger.warning(
+                        f"[{novel.novel_id}] 章节 {chapter_num} 审计门禁未通过，开始重试（跳过 State Locks）"
+                    )
+                    retry_result = await self.aftermath_pipeline._run_quality_gate(
+                        novel.novel_id.value,
+                        chapter_num,
+                        content,
+                        quality_gate_mode="retry",
+                    )
+                    drift_result.update(retry_result)
+                    if not retry_result.get("quality_gate_passed", True):
+                        logger.warning(
+                            f"[{novel.novel_id}] 章节 {chapter_num} 审计重试仍未通过，退出自动驾驶"
+                        )
+                        novel.last_audit_chapter_number = chapter_num
+                        novel.last_audit_similarity = drift_result.get("similarity_score")
+                        novel.last_audit_drift_alert = bool(drift_result.get("drift_alert", False))
+                        novel.last_audit_narrative_ok = bool(drift_result.get("narrative_sync_ok", True))
+                        novel.last_audit_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                        novel.autopilot_status = AutopilotStatus.STOPPED
+                        novel.current_stage = NovelStage.AUDITING
+                        self._save_novel_state(novel)
+                        return
+
+                    logger.info(
+                        f"[{novel.novel_id}] 章节 {chapter_num} 审计重试通过，执行信息同步"
+                    )
+                    drift_result = await self.aftermath_pipeline.run_after_chapter_saved(
+                        novel.novel_id.value,
+                        chapter_num,
+                        content,
+                    )
+                    logger.info(
+                        f"[{novel.novel_id}] 重试后章后管线完成: 相似度={drift_result.get('similarity_score')}, "
+                        f"drift_alert={drift_result.get('drift_alert')}"
+                    )
+
+                # 从已保存的 chapter 中读取张力值，更新 novel.last_chapter_tension
+                try:
+                    from domain.novel.value_objects.novel_id import NovelId
+                    chapters = self.chapter_repository.list_by_novel(NovelId(novel.novel_id.value))
+                    target_ch = next((ch for ch in chapters if ch.number == chapter_num), None)
+                    if target_ch and target_ch.tension_score:
+                        novel.last_chapter_tension = target_ch.tension_score / 10.0
+                        logger.debug(
+                            f"[{novel.novel_id}] 从章后管线读取张力值: {target_ch.tension_score:.1f}"
+                        )
+                except Exception as e:
+                    logger.debug(f"[{novel.novel_id}] 读取张力值失败，使用默认值: {e}")
+                    novel.last_chapter_tension = 5.0
+
             except Exception as e:
                 logger.warning(f"[{novel.novel_id}] 章后管线失败（降级旧逻辑）：{e}")
                 drift_result = self._legacy_auditing_tasks_and_voice(
                     novel, chapter_num, content, chapter_id
                 )
+                # 降级时使用默认张力值
+                novel.last_chapter_tension = 5.0
         else:
             drift_result = self._legacy_auditing_tasks_and_voice(
                 novel, chapter_num, content, chapter_id
             )
-
-        # 2. 张力打分（统一使用 TensionScoringService，计算四字段）
-        tension_svc = self._get_tension_scoring_service()
-        prev_tension = novel.last_chapter_tension or 50.0
-        try:
-            dims = await tension_svc.score_chapter(
-                chapter_content=content,
-                chapter_number=chapter_num,
-                prev_chapter_tension=prev_tension,
-            )
-            chapter.update_tension_dimensions(dims)
-            novel.last_chapter_tension = dims.composite_score / 10.0
-            logger.info(
-                f"[{novel.novel_id}] 章节 {chapter_num} 张力值：综合={dims.composite_score:.1f} "
-                f"情节={dims.plot_tension:.1f} 情绪={dims.emotional_tension:.1f} 节奏={dims.pacing_tension:.1f}"
-            )
-        except Exception as e:
-            logger.warning(f"[{novel.novel_id}] 章节 {chapter_num} 张力评分失败，降级默认值：{e}")
-            chapter.update_tension_score(50.0)
-            novel.last_chapter_tension = 5.0  # 0-10 范围，与 chapter.update_tension_score(50.0) 对应
-        self.chapter_repository.save(chapter)
+            # 无 aftermath_pipeline 时使用默认张力值
+            novel.last_chapter_tension = 5.0
 
         # 章末审阅快照（写入 novels，供 /autopilot/status 与前台「章节状态 / 章节元素」）
         previous_same_chapter_drift = (
@@ -1480,6 +1677,21 @@ class AutopilotDaemon:
                 f"[{novel.novel_id}] 文风相似度：{drift_result.get('similarity_score')}，"
                 f"告警：{drift_too_high}"
             )
+
+        quality_gate_passed = bool(drift_result.get("quality_gate_passed", True))
+        if not quality_gate_passed:
+            logger.warning(
+                f"[{novel.novel_id}] 章节 {chapter_num} 审计门禁未通过，退出自动驾驶"
+            )
+            novel.last_audit_chapter_number = chapter_num
+            novel.last_audit_similarity = drift_result.get("similarity_score")
+            novel.last_audit_drift_alert = bool(drift_result.get("drift_alert", False))
+            novel.last_audit_narrative_ok = bool(drift_result.get("narrative_sync_ok", True))
+            novel.last_audit_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            novel.autopilot_status = AutopilotStatus.STOPPED
+            novel.current_stage = NovelStage.AUDITING
+            self._save_novel_state(novel)
+            return
 
         # 3. 文风漂移仅保留告警，不再删章回滚
         if drift_too_high and similarity_below_threshold:

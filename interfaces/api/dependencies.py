@@ -302,7 +302,7 @@ def get_background_task_service():
 
 
 def get_chapter_aftermath_pipeline():
-    """章节保存后统一管线：叙事/向量、文风、KG 推断；三元组与伏笔、故事线、张力、对话、剧情点在叙事同步中一次 LLM 落库。"""
+    """章节保存后统一管线：先做 State Locks / 融合草稿 / Validation 门禁，再做叙事/向量、文风、KG 推断。"""
     from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
     from infrastructure.persistence.database.triple_repository import TripleRepository
     from infrastructure.persistence.database.sqlite_storyline_repository import SqliteStorylineRepository
@@ -320,6 +320,9 @@ def get_chapter_aftermath_pipeline():
         chapter_repository=get_chapter_repository(),
         plot_arc_repository=get_plot_arc_repository(),
         narrative_event_repository=SqliteNarrativeEventRepository(get_database()),
+        novel_repository=get_novel_repository(),
+        state_lock_service=get_state_lock_service(),
+        chapter_fusion_service=get_chapter_fusion_service(),
     )
 
 
