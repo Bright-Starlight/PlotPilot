@@ -11,7 +11,7 @@
 CLAUDE.md
 AGENTS.md
 .gitnexus/
-
+node_modules
 # ── Python ──
 __pycache__/
 *.py[cod]
@@ -124,3 +124,5 @@ llm_profiles.json
 # ── 锁文件（运行时生成） ──
 aitext.lock
 scripts/aitext.lock
+package-lock.json
+package.json

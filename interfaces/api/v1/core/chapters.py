@@ -217,6 +217,16 @@ async def update_chapter(
     except EntityNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+    content = request.content
+    background_tasks.add_task(
+        _run_chapter_aftermath,
+        novel_id,
+        chapter_number,
+        content,
+        pipeline,
+    )
+    return chapter
+
 
 @router.get(
     "/{novel_id}/chapters/{chapter_number}/generation-metrics",
@@ -231,16 +241,6 @@ async def get_chapter_generation_metrics(
     if metrics is None:
         raise HTTPException(status_code=404, detail=f"Generation metrics not found: {novel_id}/chapter-{chapter_number}")
     return ChapterGenerationMetricsResponse(**metrics.__dict__)
-
-    content = request.content
-    background_tasks.add_task(
-        _run_chapter_aftermath,
-        novel_id,
-        chapter_number,
-        content,
-        pipeline,
-    )
-    return chapter
 
 
 @router.get("/{novel_id}/chapters/{chapter_number}/review", response_model=ChapterReviewResponse)

@@ -13,6 +13,10 @@ VALID_LOGGING_LEVELS = [
     logging.CRITICAL
 ]
 
+LLM_TRACE_LOGGER_NAME = "plotpilot.llm"
+DEFAULT_LLM_LOG_FILE = "logs/llm_trace.log"
+DEFAULT_LLM_TRACE_ENABLED = True
+
 
 class SafeConsoleHandler(logging.StreamHandler):
     """Console handler that degrades gracefully on encoding errors.
@@ -93,6 +97,14 @@ def _validate_log_file(log_file: str) -> None:
         raise ValueError(f"Cannot write to log file '{log_file}': {e}")
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    """读取布尔型环境变量。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def setup_logging(
     level: int = logging.INFO,
     log_file: Optional[str] = None,
@@ -143,6 +155,36 @@ def setup_logging(
         except (OSError, IOError, PermissionError) as e:
             print(f"WARNING: Failed to setup file logging: {e}")
             print("Logging will continue with console output only.")
+
+    llm_trace_enabled = _env_flag("LLM_TRACE_ENABLED", DEFAULT_LLM_TRACE_ENABLED)
+    llm_log_file = os.getenv("LLM_LOG_FILE", DEFAULT_LLM_LOG_FILE)
+    if llm_trace_enabled and llm_log_file and llm_log_file.strip():
+        _validate_log_file(llm_log_file)
+        try:
+            llm_logger = logging.getLogger(LLM_TRACE_LOGGER_NAME)
+            llm_logger.setLevel(logging.DEBUG)
+            llm_logger.propagate = False
+            llm_logger.disabled = False
+            for handler in llm_logger.handlers[:]:
+                llm_logger.removeHandler(handler)
+
+            llm_file_handler = logging.FileHandler(llm_log_file, encoding="utf-8")
+            llm_file_handler.setLevel(logging.DEBUG)
+            llm_file_handler.setFormatter(
+                logging.Formatter(
+                    format_string,
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
+            llm_logger.addHandler(llm_file_handler)
+        except (OSError, IOError, PermissionError) as e:
+            print(f"WARNING: Failed to setup LLM trace logging: {e}")
+            print("LLM trace logging will be disabled.")
+    else:
+        llm_logger = logging.getLogger(LLM_TRACE_LOGGER_NAME)
+        llm_logger.handlers.clear()
+        llm_logger.propagate = False
+        llm_logger.disabled = True
 
     logging.getLogger("uvicorn").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)

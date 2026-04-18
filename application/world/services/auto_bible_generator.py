@@ -397,7 +397,10 @@ JSON 格式（不要有其他文字）：
 }}
 ```"""
 
-        bible_data = await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
+        bible_data = await self._call_llm_and_parse_with_retry(
+            system_prompt, user_prompt,
+            max_tokens=12288, temperature=1.0
+        )
         if bible_data:
             return bible_data
 
@@ -622,7 +625,10 @@ JSON 格式：
 }}
 ```"""
 
-        return await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
+        return await self._call_llm_and_parse_with_retry(
+            system_prompt, user_prompt,
+            max_tokens=8192, temperature=1.0
+        )
 
     async def _generate_characters(self, premise: str, target_chapters: int, worldbuilding: Dict[str, Any]) -> Dict[str, Any]:
         """基于世界观生成人物"""
@@ -671,7 +677,10 @@ JSON 格式：
 }}
 ```"""
 
-        return await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
+        return await self._call_llm_and_parse_with_retry(
+            system_prompt, user_prompt,
+            max_tokens=4096, temperature=1.0
+        )
 
     async def _generate_locations(self, premise: str, target_chapters: int, worldbuilding: Dict[str, Any], characters: list) -> Dict[str, Any]:
         """基于世界观和人物生成地点"""
@@ -724,7 +733,10 @@ JSON 格式：
 }}
 ```"""
 
-        return await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
+        return await self._call_llm_and_parse_with_retry(
+            system_prompt, user_prompt,
+            max_tokens=8192, temperature=1.0
+        )
 
     def _summarize_worldbuilding(self, wb: Dict[str, Any]) -> str:
         """总结世界观为文本"""
@@ -738,10 +750,16 @@ JSON 格式：
                 parts.append(f"{key}: {items}")
         return "\n".join(parts)
 
-    async def _call_llm_and_parse(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    async def _call_llm_and_parse(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 4096,
+        temperature: float = 1.0
+    ) -> Dict[str, Any]:
         """调用 LLM 并解析 JSON"""
         prompt = Prompt(system=system_prompt, user=user_prompt)
-        config = GenerationConfig(max_tokens=4096, temperature=0.7)
+        config = GenerationConfig(max_tokens=max_tokens, temperature=temperature)
         result = await self.llm_service.generate(prompt, config)
 
         content = result.content or ""
@@ -761,7 +779,9 @@ JSON 格式：
         self,
         system_prompt: str,
         user_prompt: str,
-        max_retries: int = 3
+        max_retries: int = 3,
+        max_tokens: int = 4096,
+        temperature: float = 1.0
     ) -> Dict[str, Any]:
         """带重试的LLM调用 - 增强JSON输出稳定性"""
         last_error = None
@@ -770,14 +790,18 @@ JSON 格式：
             try:
                 if attempt == 0:
                     # 第一次尝试，使用标准prompt
-                    parsed = await self._call_llm_and_parse(system_prompt, user_prompt)
+                    parsed = await self._call_llm_and_parse(
+                        system_prompt, user_prompt,
+                        max_tokens=max_tokens, temperature=temperature
+                    )
                 else:
                     # 重试时加强调prompt
                     retry_reminder = "\n\n【重要提醒】上次JSON解析失败，请严格遵守JSON输出规则！只输出纯JSON，不要任何其他文字！"
                     logger.warning(f"JSON解析重试 {attempt}/{max_retries}，添加强调提示")
                     parsed = await self._call_llm_and_parse(
                         system_prompt + retry_reminder,
-                        user_prompt
+                        user_prompt,
+                        max_tokens=max_tokens, temperature=temperature
                     )
                 if parsed:
                     return parsed

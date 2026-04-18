@@ -53,20 +53,24 @@ class BeatSheetService:
         outline: str,
         *,
         plan_version: int | None = None,
-        state_lock_version: int,
+        state_lock_version: int | None = None,
     ) -> BeatSheet:
         """为章节生成节拍表
 
         Args:
             chapter_id: 章节 ID
             outline: 章节大纲
+            plan_version: 规划版本（可选）
+            state_lock_version: 状态锁版本（可选，默认为 1）
 
         Returns:
             生成的节拍表
         """
-        logger.info(f"Generating beat sheet for chapter {chapter_id}")
-        if state_lock_version <= 0:
-            raise ValueError("state_lock_version is required")
+        logger.info(f"Generating beat sheet for chapter {chapter_id} with state_lock_version={state_lock_version}")
+        # state_lock_version 为可选，没有时使用默认值 1
+        effective_state_lock_version = state_lock_version if state_lock_version is not None and state_lock_version > 0 else 1
+        if state_lock_version is None or state_lock_version <= 0:
+            logger.warning(f"[BeatSheet] state_lock_version is missing or invalid ({state_lock_version}), using default 1")
 
         # 1. 混合检索：获取相关上下文
         context = await self._retrieve_relevant_context(chapter_id, outline)
@@ -87,7 +91,7 @@ class BeatSheetService:
             chapter_id=chapter_id,
             scenes=scenes,
             plan_version=int(plan_version or 0),
-            state_lock_version=int(state_lock_version),
+            state_lock_version=effective_state_lock_version,
         )
 
         # 6. 保存到仓储

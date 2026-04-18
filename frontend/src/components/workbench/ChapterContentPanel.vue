@@ -267,6 +267,9 @@
                 <n-alert v-if="!beatSheet && chapterPlan" type="info" :show-icon="true" size="small">
                   当前章节尚未生成真实节拍表，开始融合时会先自动生成。
                 </n-alert>
+                <n-alert v-if="beatSheetUsesOutdatedStateLock" type="warning" :show-icon="true" size="small">
+                  节拍表绑定的状态锁版本已过期（v{{ beatSheet?.state_lock_version }} → v{{ currentStateLockVersion }}），点击"整章融合"时会自动重新生成。
+                </n-alert>
                 <n-alert v-if="fusionWarningLines.length" type="warning" :show-icon="true" size="small">
                   {{ fusionWarningLines[0] }}
                 </n-alert>
@@ -596,6 +599,10 @@ const fusionUsesOutdatedStateLock = computed(() => {
   if (!fusionDraft.value || !currentStateLockVersion.value) return false
   return fusionDraft.value.state_lock_version < currentStateLockVersion.value
 })
+const beatSheetUsesOutdatedStateLock = computed(() => {
+  if (!beatSheet.value || !currentStateLockVersion.value) return false
+  return beatSheet.value.state_lock_version !== currentStateLockVersion.value
+})
 const validationIssueGroups = computed(() => {
   const levels: Array<'P0' | 'P1' | 'P2'> = ['P0', 'P1', 'P2']
   return levels.map(severity => ({
@@ -738,6 +745,7 @@ async function loadBeatSheet() {
   beatSheet.value = null
   const chapterId = fusionChapterId.value
   if (!chapterId) return
+
   try {
     const sheet = await beatSheetApi.getBeatSheet(chapterId)
     if (sheet?.scenes?.length) {
@@ -751,25 +759,75 @@ async function loadBeatSheet() {
   const outline = getBeatSheetOutline()
   if (!outline) return
 
+  // 优先使用已加载的 stateLockVersion，如果没有则尝试不带参数调用
+  const stateLockVersion = stateLocks.value?.version
+
   try {
-    const generated = await beatSheetApi.generateBeatSheet({
+    const requestParams: { chapter_id: string; outline: string; state_lock_version?: number } = {
       chapter_id: chapterId,
       outline,
-    })
+    }
+    if (stateLockVersion) {
+      requestParams.state_lock_version = stateLockVersion
+    }
+    const generated = await beatSheetApi.generateBeatSheet(requestParams)
     if (generated?.scenes?.length) {
       beatSheet.value = generated
     }
   } catch {
-    beatSheet.value = null
+    // Fallback：生成失败时，使用 outline 分割后的内容作为节拍
+    console.warn('[loadBeatSheet] Beat sheet generation failed, using outline fallback:', {
+      chapterId,
+      hasStateLock: !!stateLocks.value,
+      stateLockVersion: stateLocks.value?.version,
+    })
+
+    const outlineText = getBeatSheetOutline()
+    if (!outlineText) {
+      beatSheet.value = null
+      return
+    }
+
+    // 尝试按句子分割（按句号、问号、感叹号）
+    const sentences = outlineText.split(/[。！？；\n]+/).filter(s => s.trim().length > 0)
+    const beats = sentences.length > 0 ? sentences : [outlineText]
+
+    beatSheet.value = {
+      id: `temp-beat-sheet-${chapterId}`,
+      chapter_id: chapterId,
+      scenes: beats.map((line, index) => ({
+        title: line.slice(0, 24) || `节拍 ${index + 1}`,
+        goal: line,
+        pov_character: '',
+        location: null,
+        tone: null,
+        estimated_words: Math.round(line.length / 2),
+        order_index: index,
+      })),
+      total_scenes: beats.length,
+      total_estimated_words: beats.reduce((sum, line) => sum + Math.round(line.length / 2), 0),
+    }
   }
 }
 
 async function ensureBeatSheet(): Promise<BeatSheetDTO | null> {
   const chapterId = fusionChapterId.value
   if (!chapterId) return null
+
+  const currentStateLockVersion = stateLocks.value?.version
+
+  // 检查现有 Beat Sheet 是否有效且版本匹配
   if (beatSheet.value?.chapter_id === chapterId && beatSheet.value.scenes.length > 0) {
-    return beatSheet.value
+    // 如果 state_lock_version 不匹配，需要重新生成
+    if (currentStateLockVersion && beatSheet.value.state_lock_version !== currentStateLockVersion) {
+      console.warn(`Beat Sheet state_lock_version (${beatSheet.value.state_lock_version}) 与当前 State Lock 版本 (${currentStateLockVersion}) 不匹配，重新生成`)
+      // 清空旧的 Beat Sheet，强制重新生成
+      beatSheet.value = null
+    } else {
+      return beatSheet.value
+    }
   }
+
   await loadBeatSheet()
   if (beatSheet.value?.chapter_id === chapterId && beatSheet.value.scenes.length > 0) {
     return beatSheet.value
@@ -910,11 +968,22 @@ async function loadStateLocks() {
   stateLocks.value = null
   const chapterId = fusionChapterId.value
   if (!chapterId) return
-  try {
-    stateLocks.value = await stateLocksApi.getCurrentStateLocks(chapterId)
-  } catch {
-    stateLocks.value = null
+
+  // 重试机制：最多尝试 3 次
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const result = await stateLocksApi.getCurrentStateLocks(chapterId)
+      stateLocks.value = result
+      return
+    } catch (err) {
+      console.warn(`[loadStateLocks] Attempt ${attempt + 1} failed:`, err)
+      if (attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+    }
   }
+  // 所有尝试都失败
+  stateLocks.value = null
 }
 
 async function generateStateLocks() {
@@ -1083,7 +1152,8 @@ async function loadKnowledgeChapter() {
   if (!props.slug || !props.currentChapterNumber) return
   try {
     const k = await knowledgeApi.getKnowledge(props.slug)
-    const row = k.chapters?.find(c => c.chapter_id === props.currentChapterNumber)
+    const chapterNum = Number(props.currentChapterNumber)
+    const row = k.chapters?.find(c => Number(c.chapter_id) === chapterNum)
     knowledgeChapter.value = row ?? null
   } catch {
     knowledgeChapter.value = null
@@ -1092,10 +1162,11 @@ async function loadKnowledgeChapter() {
 
 async function refreshChapterData() {
   await resolveStoryNode()
+  // 先加载 stateLocks（被 beatSheet 生成依赖），再并行加载其他
+  await loadStateLocks()
   await Promise.all([
     loadKnowledgeChapter(),
     loadBeatSheet(),
-    loadStateLocks(),
   ])
   await loadLatestValidationReport()
 }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import AsyncIterator
+import json
+import logging
+from typing import Any, AsyncIterator, Optional
 
 from application.ai.llm_control_service import LLMControlService, LLMProfile
 from domain.ai.services.llm_service import GenerationConfig, GenerationResult, LLMService
@@ -16,7 +18,55 @@ from infrastructure.ai.url_utils import (
     normalize_openai_base_url,
 )
 
+logger = logging.getLogger(__name__)
+llm_trace_logger = logging.getLogger("plotpilot.llm")
+
 _DEFAULT_CONFIG = GenerationConfig()
+
+
+def _prompt_trace(prompt: Prompt) -> dict[str, Any]:
+    return {
+        "system_chars": len(prompt.system or ""),
+        "user_chars": len(prompt.user or ""),
+        "system": prompt.system or "",
+        "user": prompt.user or "",
+    }
+
+
+def _config_trace(config: GenerationConfig) -> dict[str, Any]:
+    return {
+        "model": config.model,
+        "max_tokens": config.max_tokens,
+        "temperature": config.temperature,
+    }
+
+
+def _pretty_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _json_block(value: Any) -> str:
+    return f"```json\n{_pretty_json(value)}\n```"
+
+
+def _section(title: str, content: str) -> str:
+    return f"{title}:\n{content}"
+
+
+def _text_block(text: str) -> str:
+    body = text or ""
+    if body:
+        return f"```text\n{body}\n```"
+    return "  <empty>"
+
+
+def _trace_message(header: str, sections: list[tuple[str, str]]) -> str:
+    lines = [header]
+    for index, (title, content) in enumerate(sections):
+        if index:
+            lines.append("")
+        lines.append(_section(title, content))
+    return "\n".join(lines)
 
 
 class LLMProviderFactory:
@@ -102,10 +152,120 @@ class DynamicLLMService(LLMService):
     async def generate(self, prompt: Prompt, config: GenerationConfig) -> GenerationResult:
         provider = self._resolve_provider()
         effective_config = self._merge_config(config, provider)
-        return await provider.generate(prompt, effective_config)
+        provider_name = provider.__class__.__name__
+        trace_enabled = llm_trace_logger.isEnabledFor(logging.INFO)
+        if trace_enabled:
+            llm_trace_logger.info(
+                _trace_message(
+                    "llm.generate start",
+                    [
+                        ("provider", provider_name),
+                        ("config", _json_block(_config_trace(effective_config))),
+                        (
+                            "prompt",
+                            _json_block(_prompt_trace(prompt)),
+                        ),
+                        ("system_prompt", _text_block(prompt.system or "")),
+                        ("user_prompt", _text_block(prompt.user or "")),
+                    ],
+                ),
+            )
+        try:
+            result = await provider.generate(prompt, effective_config)
+            if trace_enabled:
+                llm_trace_logger.info(
+                    _trace_message(
+                        "llm.generate end",
+                        [
+                            ("provider", provider_name),
+                            ("output_chars", str(len(result.content or ""))),
+                            (
+                                "token_usage",
+                                _json_block(
+                                    {
+                                        "input_tokens": getattr(result.token_usage, "input_tokens", None)
+                                        if getattr(result, "token_usage", None)
+                                        else None,
+                                        "output_tokens": getattr(result.token_usage, "output_tokens", None)
+                                        if getattr(result, "token_usage", None)
+                                        else None,
+                                    }
+                                ),
+                            ),
+                            ("output", _text_block(result.content or "")),
+                        ],
+                    ),
+                )
+            return result
+        except Exception as e:
+            if trace_enabled:
+                llm_trace_logger.warning(
+                    _trace_message(
+                        "llm.generate error",
+                        [
+                            ("provider", provider_name),
+                            ("config", _json_block(_config_trace(effective_config))),
+                            ("prompt_chars", str(len(prompt.user or ""))),
+                            ("error_type", type(e).__name__),
+                            ("error", str(e)),
+                        ],
+                    ),
+                    exc_info=True,
+                )
+            raise
 
     async def stream_generate(self, prompt: Prompt, config: GenerationConfig) -> AsyncIterator[str]:
         provider = self._resolve_provider()
         effective_config = self._merge_config(config, provider)
-        async for chunk in provider.stream_generate(prompt, effective_config):
-            yield chunk
+        provider_name = provider.__class__.__name__
+        trace_enabled = llm_trace_logger.isEnabledFor(logging.INFO)
+        if trace_enabled:
+            llm_trace_logger.info(
+                _trace_message(
+                    "llm.stream start",
+                    [
+                        ("provider", provider_name),
+                        ("config", _json_block(_config_trace(effective_config))),
+                        ("prompt", _json_block(_prompt_trace(prompt))),
+                        ("system_prompt", _text_block(prompt.system or "")),
+                        ("user_prompt", _text_block(prompt.user or "")),
+                    ],
+                ),
+            )
+        output_parts: list[str] = []
+        output_chars = 0
+        try:
+            async for chunk in provider.stream_generate(prompt, effective_config):
+                text = chunk or ""
+                output_chars += len(text)
+                if trace_enabled:
+                    output_parts.append(text)
+                yield chunk
+            if trace_enabled:
+                llm_trace_logger.info(
+                    _trace_message(
+                        "llm.stream end",
+                        [
+                            ("provider", provider_name),
+                            ("output_chars", str(output_chars)),
+                            ("output", _text_block("".join(output_parts))),
+                        ],
+                    ),
+                )
+        except Exception as e:
+            if trace_enabled:
+                llm_trace_logger.warning(
+                    _trace_message(
+                        "llm.stream error",
+                        [
+                            ("provider", provider_name),
+                            ("config", _json_block(_config_trace(effective_config))),
+                            ("prompt_chars", str(len(prompt.user or ""))),
+                            ("output_chars", str(output_chars)),
+                            ("error_type", type(e).__name__),
+                            ("error", str(e)),
+                        ],
+                    ),
+                    exc_info=True,
+                )
+            raise

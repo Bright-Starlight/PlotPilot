@@ -39,7 +39,7 @@ class GenerateBeatSheetRequest(BaseModel):
     chapter_id: str = Field(..., description="章节 ID")
     outline: str = Field(..., description="章节大纲")
     plan_version: int | None = Field(default=None, gt=0, description="规划版本（可选）")
-    state_lock_version: int = Field(..., gt=0, description="状态锁版本")
+    state_lock_version: int | None = Field(default=None, description="状态锁版本（可选）")
 
 
 @router.post("/generate", response_model=BeatSheetResponse)

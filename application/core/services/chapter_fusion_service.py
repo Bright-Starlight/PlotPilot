@@ -331,7 +331,7 @@ class ChapterFusionService:
                     beat_id=beat_id,
                     title=scene.title,
                     function=scene.goal,
-                    event=f"{scene.title}：{scene.goal}",
+                    event=f"{scene.title}:{scene.goal}",
                     location=scene.location or "",
                     end_state=end_state,
                 )
@@ -374,7 +374,7 @@ class ChapterFusionService:
             seen_signatures.add(signature)
             unique_beats.append(beat)
         if duplicate_count:
-            warnings.append(f"发现 {duplicate_count} 个重复功能节拍，已合并")
+            warnings.append(f"发现 {duplicate_count} 个重复功能节拍,已合并")
             logger.info("fusion compose deduplicated duplicate_count=%s", duplicate_count)
 
         end_states = [b.end_state for b in unique_beats if b.end_state]
@@ -420,6 +420,16 @@ class ChapterFusionService:
                 "message": "Fusion generation failed",
             }
 
+        logger.info(
+            "fusion compose llm_response text_length=%s facts_used_count=%s end_state=%s suspense_used=%s open_questions_count=%s model_warnings_count=%s",
+            len(payload.text),
+            len(payload.facts_used),
+            payload.end_state,
+            payload.suspense_used,
+            len(payload.open_questions),
+            len(payload.model_warnings),
+        )
+
         text = payload.text.strip()
         if not text:
             logger.warning("fusion compose failed reason=empty_text")
@@ -432,17 +442,39 @@ class ChapterFusionService:
         facts_confirmed = self._resolve_confirmed_facts(required_facts, payload.facts_used)
         missing_facts = [fact for fact in required_facts if fact not in facts_confirmed]
         if missing_facts:
-            preview = "；".join(missing_facts[:3])
-            warnings.append(f"融合稿缺失 {len(missing_facts)} 条关键事实：{preview}")
-            logger.warning("fusion compose missing_facts count=%s", len(missing_facts))
+            preview = ";".join(missing_facts[:3])
+            warnings.append(f"融合稿缺失 {len(missing_facts)} 条关键事实:{preview}")
+            logger.warning(
+                "fusion compose missing_facts count=%s missing=%s facts_used=%s",
+                len(missing_facts),
+                missing_facts,
+                payload.facts_used,
+            )
 
         open_questions: List[str] = list(dict.fromkeys(payload.open_questions))
-        if end_state and payload.end_state and self._normalize_state(payload.end_state) != self._normalize_state(end_state):
-            logger.warning("fusion compose failed reason=end_state_conflict")
-            return {
-                "status": "failed",
-                "message": "Output end state conflicts with beat constraints",
-            }
+        # 检查终态冲突:只验证 location 字段,允许其他字段不同
+        if end_state and payload.end_state:
+            expected_location = str(end_state.get("location") or "").strip()
+            actual_location = str(payload.end_state.get("location") or payload.end_state.get("state") or "").strip()
+            logger.info(
+                "fusion compose end_state validation expected_end_state=%s llm_end_state=%s expected_location=%s actual_location=%s",
+                end_state,
+                payload.end_state,
+                expected_location,
+                actual_location,
+            )
+            if expected_location and actual_location and expected_location != actual_location:
+                logger.warning(
+                    "fusion compose failed reason=end_state_conflict expected_location=%s actual_location=%s expected_end_state=%s llm_end_state=%s",
+                    expected_location,
+                    actual_location,
+                    end_state,
+                    payload.end_state,
+                )
+                return {
+                    "status": "failed",
+                    "message": f"Output end state conflicts with beat constraints: expected location '{expected_location}', got '{actual_location}'",
+                }
         end_state = payload.end_state or end_state
         state_lock_violations = self._collect_state_lock_violations(state_locks or {}, text, end_state)
         if state_lock_violations:
@@ -458,14 +490,14 @@ class ChapterFusionService:
                 estimated_words,
             )
         if repeat_ratio > 0.15:
-            warnings.append("重复率偏高，建议回到 Beat 层继续去重")
+            warnings.append("重复率偏高,建议回到 Beat 层继续去重")
             logger.info("fusion compose repeat_ratio_high repeat_ratio=%s", round(repeat_ratio, 2))
 
         suspense_total = int(suspense_budget.get("primary") or 0) + int(suspense_budget.get("secondary") or 0)
         if suspense_total <= 0:
             open_questions.append("需要补足悬念预算")
         elif payload.suspense_used < suspense_total:
-            warnings.append(f"悬念预算未完全覆盖，目标 {suspense_total}，实际 {payload.suspense_used}")
+            warnings.append(f"悬念预算未完全覆盖,目标 {suspense_total},实际 {payload.suspense_used}")
             logger.info(
                 "fusion compose suspense_budget_partial target=%s used=%s",
                 suspense_total,
@@ -508,11 +540,11 @@ class ChapterFusionService:
         for index, beat in enumerate(beat_drafts, start=1):
             beat_lines.append(
                 (
-                    f"{index}. 标题：{beat.title}\n"
-                    f"   作用：{beat.function}\n"
-                    f"   事件：{beat.event}\n"
-                    f"   地点：{beat.location or '未指定'}\n"
-                    f"   终态：{beat.end_state or {}}"
+                    f"{index}. 标题:{beat.title}\n"
+                    f"   作用:{beat.function}\n"
+                    f"   事件:{beat.event}\n"
+                    f"   地点:{beat.location or '未指定'}\n"
+                    f"   终态:{beat.end_state or {}}"
                 )
             )
         fact_lines = "\n".join(f"- {fact}" for fact in required_facts) or "- 无"
@@ -520,25 +552,25 @@ class ChapterFusionService:
         system_prompt = (
             "你是长篇小说章节融合编辑。"
             "你的任务是把节拍草稿融合成自然、连贯、可继续润色的章节正文。"
-            "不要输出条目式标题，不要写“节拍一/节拍二”，正文必须是小说自然段。"
+            "不要输出条目式标题，不要写节拍一或节拍二，正文必须是小说自然段。"
             "必须覆盖全部关键事实，保持人物关系与终态约束，不要编造输入里没有的新设定。"
             "只输出符合 JSON schema 的对象。"
         )
         user_prompt = (
-            "任务代号：fusion_generation_v1\n\n"
-            f"章节标题：{chapter_title or '未命名章节'}\n"
-            f"目标字数：{target_words}\n"
-            f"悬念预算：主悬念 {int(suspense_budget.get('primary') or 0)}，支悬念 {int(suspense_budget.get('secondary') or 0)}\n"
-            f"预期终态：{expected_end_state or {}}\n\n"
-            f"章节大纲：\n{chapter_outline or '无'}\n\n"
-            f"现有正文（可吸收但不要原样拼贴）：\n{chapter_content or '无'}\n\n"
-            f"节拍草稿：\n{'\n\n'.join(beat_lines)}\n\n"
-            f"必保留事实：\n{fact_lines}\n\n"
-            f"状态锁：\n{state_lock_lines}\n\n"
-            "输出要求：\n"
-            "1. text 必须是自然正文，避免“标题：内容”的模板痕迹。\n"
+            "任务代号:fusion_generation_v1\n\n"
+            f"章节标题:{chapter_title or '未命名章节'}\n"
+            f"目标字数:{target_words}\n"
+            f"悬念预算:主悬念 {int(suspense_budget.get('primary') or 0)},支悬念 {int(suspense_budget.get('secondary') or 0)}\n"
+            f"预期终态:{expected_end_state or {}}\n\n"
+            f"章节大纲:\n{chapter_outline or '无'}\n\n"
+            f"现有正文(可吸收但不要原样拼贴):\n{chapter_content or '无'}\n\n"
+            f"节拍草稿:\n{'\n\n'.join(beat_lines)}\n\n"
+            f"必保留事实:\n{fact_lines}\n\n"
+            f"状态锁:\n{state_lock_lines}\n\n"
+            "输出要求:\n"
+            "1. text 必须是自然正文，避免标题加内容的模板痕迹。\n"
             "2. facts_used 必须逐条列出已覆盖的关键事实，文本内容需与输入事实一致。\n"
-            "3. end_state 只填写正文最终收束状态；若输入没有终态可返回空对象。\n"
+            "3. end_state 填写正文最终收束状态，格式为 {\"location\": \"地点名称\"}；若预期终态为空或正文未明确终态，返回空对象 {}。\n"
             "4. suspense_used 填写正文实际保留的悬念数量。\n"
             "5. open_questions 仅列出正文仍未解决的问题。\n"
             "6. model_warnings 仅列出你无法完全满足的约束。"
@@ -570,7 +602,7 @@ class ChapterFusionService:
                 name = str(entry.get("value") or "").strip()
                 if name and name in content:
                     violations.append(
-                        {"group": "character_lock", "message": f"正文包含被禁止人物：{name}"}
+                        {"group": "character_lock", "message": f"正文包含被禁止人物:{name}"}
                     )
         for entry in (state_locks.get("numeric_lock", {}) or {}).get("entries", []):
             label = str(entry.get("label") or "").strip()
@@ -585,7 +617,7 @@ class ChapterFusionService:
             actual_end = str(end_state.get("location") or end_state.get("state") or "").strip()
             if expected_end and actual_end and expected_end != actual_end:
                 violations.append(
-                    {"group": "ending_lock", "message": f"终态偏离状态锁：应为 {expected_end}，实际为 {actual_end}"}
+                    {"group": "ending_lock", "message": f"终态偏离状态锁:应为 {expected_end},实际为 {actual_end}"}
                 )
         return violations
 
@@ -624,7 +656,7 @@ class ChapterFusionService:
             return 0
         latin_tokens = re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", text)
         cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
-        punctuation = re.findall(r"[。！？?!,.，、；：\n\r\t ]", text)
+        punctuation = re.findall(r"[。！？?!,.,,;:\n\r\t ]", text)
         cjk_estimate = math.ceil(len(cjk_chars) / 2)
         baseline = len(latin_tokens) + cjk_estimate
         return max(1, baseline - len(punctuation) // 12)
