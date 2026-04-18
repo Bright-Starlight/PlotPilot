@@ -1630,7 +1630,7 @@ class AutopilotDaemon:
                         novel.last_audit_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                         novel.autopilot_status = AutopilotStatus.STOPPED
                         novel.current_stage = NovelStage.AUDITING
-                        self._save_novel_state(novel)
+                        self.novel_repository.save(novel)  # 直接保存，避免 _save_novel_state 覆盖状态
                         return
 
                 # 门禁通过后，执行完整信息同步（使用融合草稿）
@@ -1725,7 +1725,7 @@ class AutopilotDaemon:
             novel.last_audit_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             novel.autopilot_status = AutopilotStatus.STOPPED
             novel.current_stage = NovelStage.AUDITING
-            self._save_novel_state(novel)
+            self.novel_repository.save(novel)  # 直接保存，避免 _save_novel_state 覆盖状态
             return
 
         # 3. 文风漂移仅保留告警，不再删章回滚
