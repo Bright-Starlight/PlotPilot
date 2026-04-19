@@ -133,8 +133,10 @@ class WordControlService:
         current: int,
         attempt: int,
         max_attempts: int,
+        existing_excerpt: Optional[str] = None,
     ) -> Prompt:
         remaining = max(target - current, 0)
+        excerpt = (existing_excerpt if existing_excerpt is not None else existing_text).strip()
         system = (
             "你是长篇小说续写助手。你的任务是在不重复已有内容的前提下，为当前章节补写缺失部分。"
             "必须严格承接既有剧情、人物关系和叙事口吻，只输出可直接拼接到正文末尾的新内容。"
@@ -145,11 +147,12 @@ class WordControlService:
             f"建议补写：约 {remaining} 字\n"
             f"补写轮次：第 {attempt}/{max_attempts} 轮\n\n"
             f"章节大纲：\n{outline.strip()}\n\n"
-            "已有章节内容如下，请从末尾自然续写：\n"
-            f"{existing_text.strip()}\n\n"
+            "以下是正文末尾摘录，请只从这个结尾继续写，不要重写整章：\n"
+            f"{excerpt}\n\n"
             "硬性要求：\n"
             "- 严禁重复前文已出现的句子、动作、对白或总结。\n"
-            "- 只补足缺失剧情，不重写开头。\n"
+            "- 只补足缺失剧情，不重写开头，不要回顾全文。\n"
+            "- 优先补动作推进、人物互动和场景变化，避免空泛总结。\n"
             "- 保持结尾自然，尽量朝目标字数靠拢。\n"
             "- 直接输出续写正文，不要解释。"
         )

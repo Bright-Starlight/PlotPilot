@@ -10,25 +10,17 @@ const mocks = vi.hoisted(() => ({
   saveChapterReview: vi.fn(),
   reviewChapterAi: vi.fn(),
   updateChapter: vi.fn(),
-  checkPublishable: vi.fn(),
   getChapterInferenceEvidence: vi.fn(),
   revokeInferredTriple: vi.fn(),
   revokeChapterInference: vi.fn(),
   message: {
     success: vi.fn(),
     error: vi.fn(),
+    info: vi.fn(),
   },
-  warningOptions: null as Record<string, unknown> | null,
-  errorOptions: null as Record<string, unknown> | null,
   dialog: {
-    warning: vi.fn((options: Record<string, unknown>) => {
-      mocks.warningOptions = options
-      return {}
-    }),
-    error: vi.fn((options: Record<string, unknown>) => {
-      mocks.errorOptions = options
-      return {}
-    }),
+    warning: vi.fn(),
+    error: vi.fn(),
   },
   routerPush: vi.fn(),
   statsOnChapterSaved: vi.fn(),
@@ -62,9 +54,7 @@ vi.mock('@/api/chapter', () => ({
 }))
 
 vi.mock('@/api/validationReports', () => ({
-  validationReportsApi: {
-    checkPublishable: mocks.checkPublishable,
-  },
+  validationReportsApi: {},
 }))
 
 vi.mock('@/api/knowledgeGraph', () => ({
@@ -97,11 +87,9 @@ function mountView() {
   return mount(Chapter)
 }
 
-describe('Chapter publish gate', () => {
+describe('Chapter review and save actions', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.warningOptions = null
-    mocks.errorOptions = null
     mocks.listChapters.mockResolvedValue([{ id: 'chapter-1', number: 1, title: '第一章' }])
     mocks.getChapter.mockResolvedValue({
       id: 'chapter-1',
@@ -134,6 +122,24 @@ describe('Chapter publish gate', () => {
         hint: '',
       },
     })
+    mocks.updateChapter.mockResolvedValue({
+      id: 'chapter-1',
+      novel_id: 'novel-1',
+      number: 1,
+      title: '第一章',
+      content: '正文',
+      word_count: 2,
+      status: 'draft',
+      aftermath: {
+        narrative_sync_ok: true,
+        voice_sync_ok: true,
+        kg_sync_ok: true,
+        local_sync_ok: true,
+        local_sync_errors: [],
+        drift_alert: false,
+        similarity_score: null,
+      },
+    })
     mocks.saveChapterReview.mockResolvedValue({
       status: 'approved',
       memo: '',
@@ -142,53 +148,36 @@ describe('Chapter publish gate', () => {
     })
   })
 
-  it('blocks publish and shows dialog when publish gate fails', async () => {
-    mocks.checkPublishable.mockResolvedValue({
-      publishable: false,
-      report_id: 'vr-1',
-      chapter_id: 'chapter-1',
-      draft_type: 'fusion',
-      draft_id: 'fusion-1',
-      plan_version: 3,
-      state_lock_version: 5,
-      status: 'completed',
-      passed: false,
-      blocking_issue_count: 1,
-      p0_count: 1,
-      p1_count: 0,
-      p2_count: 0,
-      token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-      issues_by_severity: { P0: [], P1: [], P2: [] },
-      blocking_issues: [
-        {
-          issue_id: 'vi-1',
-          report_id: 'vr-1',
-          chapter_id: 'chapter-1',
-          severity: 'P0',
-          code: 'ending_lock_violation',
-          title: '违反终态锁',
-          message: '终态落点错误',
-          spans: [],
-          blocking: true,
-          suggest_patch: true,
-          status: 'unresolved',
-          metadata: {},
-        },
-      ],
-    })
-
+  it('saves approved review without triggering publish gate logic', async () => {
     const wrapper = mountView()
     await flushPromises()
 
     ;(wrapper.vm as unknown as { reviewStatus: string }).reviewStatus = 'ok'
     await (wrapper.vm as unknown as { saveReview: () => Promise<void> }).saveReview()
 
-    expect(mocks.dialog.warning).toHaveBeenCalled()
-    const result = await (mocks.warningOptions?.onPositiveClick as (() => Promise<boolean>) | undefined)?.()
-    expect(result).toBe(false)
-    expect(mocks.checkPublishable).toHaveBeenCalledWith('chapter-1')
-    expect(mocks.saveChapterReview).not.toHaveBeenCalled()
-    expect(mocks.dialog.error).toHaveBeenCalled()
-    expect(String(mocks.errorOptions?.title || '')).toContain('发布已阻断')
+    expect(mocks.saveChapterReview).toHaveBeenCalledWith('novel-1', 1, 'approved', '')
+    expect(mocks.dialog.warning).not.toHaveBeenCalled()
+  })
+
+  it('shows a hint when saving content without any正文改动', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await (wrapper.vm as unknown as { saveContent: () => Promise<void> }).saveContent()
+
+    expect(mocks.message.info).toHaveBeenCalledWith('正文没有改动')
+    expect(mocks.updateChapter).not.toHaveBeenCalled()
+  })
+
+  it('saves content directly and reports local sync status', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    ;(wrapper.vm as unknown as { content: string }).content = '融合稿正文'
+    ;(wrapper.vm as unknown as { saveStatus: string }).saveStatus = 'unsaved'
+
+    await (wrapper.vm as unknown as { saveContent: () => Promise<void> }).saveContent()
+
+    expect(mocks.updateChapter).toHaveBeenCalledWith('novel-1', 1, { content: '融合稿正文' })
+    expect(mocks.message.success).toHaveBeenCalledWith('正文已保存，本地同步完成')
   })
 })

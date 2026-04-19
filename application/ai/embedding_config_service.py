@@ -87,8 +87,8 @@ class EmbeddingConfigService:
         if self._db is not None:
             return self._db
         try:
-            from interfaces.api.dependencies import get_db as _get_global_db
-            return _get_global_db()
+            from interfaces.api.dependencies import get_database
+            return get_database()
         except Exception:
             pass
         from infrastructure.persistence.database.connection import DatabaseConnection

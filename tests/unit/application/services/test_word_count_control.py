@@ -29,10 +29,10 @@ async def test_generate_with_word_control_still_too_short_after_two_expansions()
 
     result = await generate_with_word_control(prompt, 100, llm_caller)
 
-    assert result["status"] == "too_short"
+    assert result["status"] == "needs_expansion"
     assert result["expansion_attempts"] == 2
     assert result["fallback_used"] is True
-    assert result["action"] == "expanded"
+    assert result["action"] == "needs_expansion"
 
 
 @pytest.mark.asyncio
@@ -49,10 +49,28 @@ async def test_generate_with_word_control_emits_expansion_events():
 
     await generate_with_word_control(prompt, 100, llm_caller, emit_event=emit_event)
 
-    assert len(events) == 2
+    assert len(events) == 3
     assert events[0]["word_control_step"] == "expanding"
     assert events[0]["word_control_attempt"] == 1
+    assert events[1]["word_control_step"] == "expanding"
     assert events[1]["word_control_attempt"] == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_with_word_control_emits_needs_expansion_event():
+    prompt = Prompt(system="你是小说作家", user="请生成一章内容")
+    outputs = iter(["甲" * 20, "乙" * 10, "丙" * 8])
+    events = []
+
+    async def llm_caller(_: Prompt) -> str:
+        return next(outputs)
+
+    async def emit_event(event):
+        events.append(event)
+
+    await generate_with_word_control(prompt, 100, llm_caller, emit_event=emit_event)
+
+    assert events[-1]["word_control_step"] == "needs_expansion"
 
 
 @pytest.mark.asyncio
@@ -122,3 +140,16 @@ async def test_trim_to_target_without_sentence_endings_falls_back_to_hard_limit(
 
     assert trimmed == text[:10]
     assert len(trimmed) == 10
+
+
+@pytest.mark.asyncio
+async def test_generate_with_word_control_raises_non_retryable_errors():
+    prompt = Prompt(system="你是小说作家", user="请生成一章内容")
+    outputs = iter(["甲" * 20])
+
+    async def llm_caller(_: Prompt):
+        next(outputs)
+        raise ValueError("unexpected parser failure")
+
+    with pytest.raises(ValueError, match="unexpected parser failure"):
+        await generate_with_word_control(prompt, 100, llm_caller)

@@ -13,6 +13,8 @@ from domain.ai.value_objects.prompt import Prompt
 
 
 _word_control_service = WordControlService()
+_DEFAULT_EXPANSION_CONTEXT_CHARS = 1200
+_DEFAULT_EXPANSION_MAX_TOKENS = 1600
 
 
 def _coerce_content(result: Any) -> str:
@@ -91,6 +93,7 @@ async def generate_with_word_control(
     expansion_attempts = 0
     trim_applied = False
     fallback_used = False
+    needs_expansion = False
 
     if best_check.status == "too_short":
         for attempt in range(1, _word_control_service.max_expansion_attempts + 1):
@@ -107,14 +110,26 @@ async def generate_with_word_control(
                 )
             expansion_prompt = _word_control_service.build_expansion_prompt(
                 existing_text=best_content,
+                existing_excerpt=best_content[-_DEFAULT_EXPANSION_CONTEXT_CHARS:],
                 outline=prompt.user,
                 target=target_words,
                 current=best_check.actual,
                 attempt=attempt,
                 max_attempts=_word_control_service.max_expansion_attempts,
             )
-            addition_result = await _invoke_llm_caller(llm_caller, expansion_prompt, generation_config)
-            addition = _coerce_content(addition_result).strip()
+            expansion_config = _build_expansion_config(
+                generation_config=generation_config,
+                target_words=target_words,
+                current_words=best_check.actual,
+                attempt=attempt,
+            )
+            try:
+                addition_result = await _invoke_llm_caller(llm_caller, expansion_prompt, expansion_config)
+                addition = _coerce_content(addition_result).strip()
+            except Exception as exc:
+                if not _is_retryable_word_control_exception(exc):
+                    raise
+                addition = ""
             if addition:
                 best_content = f"{best_content.rstrip()}\n\n{addition}".strip()
             current_check = _word_control_service.check_word_count(best_content, target_words)
@@ -126,6 +141,7 @@ async def generate_with_word_control(
 
         if not best_check.within_tolerance:
             fallback_used = expansion_attempts >= _word_control_service.max_expansion_attempts
+            needs_expansion = True
 
     final_check = _word_control_service.check_word_count(best_content, target_words)
     if abs(final_check.delta) <= abs(best_check.delta):
@@ -151,15 +167,29 @@ async def generate_with_word_control(
     action = "none"
     if trim_applied:
         action = "trimmed"
+    elif needs_expansion:
+        action = "needs_expansion"
     elif expansion_attempts > 0:
         action = "expanded"
+
+    status = "needs_expansion" if needs_expansion and best_check.status == "too_short" else best_check.status
+    if needs_expansion and emit_event is not None:
+        await emit_event(
+            {
+                "type": "phase",
+                "phase": "post",
+                "status_text": "正文仍显著欠字，需人工补写",
+                "word_control_step": "needs_expansion",
+                "word_control_attempt": expansion_attempts,
+            }
+        )
 
     return {
         "content": best_content,
         "actual_word_count": best_check.actual,
         "target_word_count": best_check.target,
         "delta": best_check.delta,
-        "status": best_check.status,
+        "status": status,
         "within_tolerance": best_check.within_tolerance,
         "expansion_attempts": expansion_attempts,
         "trim_applied": trim_applied,
@@ -169,3 +199,36 @@ async def generate_with_word_control(
         "max_allowed": best_check.max_allowed,
         "tolerance": best_check.tolerance,
     }
+
+
+def _build_expansion_config(
+    *,
+    generation_config: Optional[GenerationConfig],
+    target_words: int,
+    current_words: int,
+    attempt: int,
+) -> GenerationConfig:
+    remaining_words = max(target_words - current_words, 0)
+    base_max_tokens = getattr(generation_config, "max_tokens", None) or _DEFAULT_EXPANSION_MAX_TOKENS
+    retry_max_tokens = max(512, min(base_max_tokens, max(800, remaining_words * 2)))
+    temperature = 0.2 if attempt > 1 else 0.3
+    model = getattr(generation_config, "model", None)
+    response_format = getattr(generation_config, "response_format", None)
+    return GenerationConfig(
+        model=model,
+        max_tokens=retry_max_tokens,
+        temperature=temperature,
+        response_format=response_format,
+    )
+
+
+def _is_retryable_word_control_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return "no text content" in message or "max_tokens" in message or "extractable text" in message
+
+
+def _is_retryable_word_control_exception(exc: Exception) -> bool:
+    if isinstance(exc, RuntimeError):
+        return _is_retryable_word_control_error(exc)
+    message = str(exc).lower()
+    return "no text content" in message or "max_tokens" in message or "extractable text" in message

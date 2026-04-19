@@ -267,7 +267,6 @@ class StateLockService:
         ending_target = (
             self._extract_location(getattr(current_summary, "ending_state", "") or "")
             or str(getattr(plan, "timeline_end", "") or "").strip()
-            or (inferred_locations[-1] if inferred_locations else "")
         )
 
         event_lines = []

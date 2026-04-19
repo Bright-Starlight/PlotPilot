@@ -1,8 +1,8 @@
 """Chapter API 路由"""
 import logging
-from typing import List, Literal
+from typing import Any, List, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 
 from application.core.services.chapter_service import ChapterService
@@ -21,16 +21,6 @@ from interfaces.api.dependencies import (
 )
 from domain.shared.exceptions import EntityNotFoundError
 logger = logging.getLogger(__name__)
-
-
-async def _run_chapter_aftermath(
-    novel_id: str,
-    chapter_number: int,
-    content: str,
-    pipeline: ChapterAftermathPipeline,
-) -> None:
-    """与托管/守护进程同源的章后管线（叙事/向量、文风、KG；三元组与伏笔单次 LLM）。"""
-    await pipeline.run_after_chapter_saved(novel_id, chapter_number, content)
 
 
 router = APIRouter(tags=["chapters"])
@@ -89,10 +79,32 @@ class ChapterGenerationMetricsResponse(BaseModel):
     expansion_attempts: int
     trim_applied: bool
     fallback_used: bool
+    beat_quality: list[dict[str, Any]] | None = None
     min_allowed: int
     max_allowed: int
     created_at: str | None = None
     updated_at: str | None = None
+
+
+class ChapterAftermathStatusResponse(BaseModel):
+    narrative_sync_ok: bool
+    voice_sync_ok: bool
+    kg_sync_ok: bool
+    local_sync_ok: bool
+    local_sync_errors: list[str] = Field(default_factory=list)
+    drift_alert: bool = False
+    similarity_score: float | None = None
+
+
+class UpdateChapterResponse(BaseModel):
+    id: str
+    novel_id: str
+    number: int
+    title: str
+    content: str
+    word_count: int
+    status: str
+    aftermath: ChapterAftermathStatusResponse
 
 
 class CreateChapterRequest(BaseModel):
@@ -196,36 +208,153 @@ async def ensure_chapter(
     return service.ensure_chapter(novel_id, chapter_number, request.title)
 
 
-@router.put("/{novel_id}/chapters/{chapter_number}", response_model=ChapterDTO)
+def _rollback_chapter_content(service: ChapterService, novel_id: str, chapter_number: int, original_content: str) -> None:
+    try:
+        service.update_chapter_by_novel_and_number(
+            novel_id,
+            chapter_number,
+            original_content,
+        )
+    except Exception as exc:
+        logger.error(
+            "chapter rollback failed novel_id=%s chapter_number=%s error=%s",
+            novel_id,
+            chapter_number,
+            exc,
+        )
+
+
+def _resolve_latest_fusion_draft_binding(
+    service: ChapterService,
+    pipeline: ChapterAftermathPipeline,
+    chapter: ChapterDTO,
+    explicit_binding: ChapterDraftBindingRequest | None,
+) -> dict[str, Any] | None:
+    if explicit_binding is not None:
+        return explicit_binding.model_dump()
+
+    fusion_service = getattr(pipeline, "_chapter_fusion_service", None)
+    fusion_repository = getattr(fusion_service, "fusion_repository", None)
+    if fusion_repository is None:
+        return None
+
+    draft = fusion_repository.get_latest_draft_for_chapter(chapter.id)
+    if draft is None:
+        return None
+
+    return {
+        "draft_type": "merged",
+        "draft_id": "merged-current",
+        "plan_version": int(draft.plan_version),
+        "state_lock_version": int(draft.state_lock_version),
+        "source_fusion_id": draft.fusion_id,
+    }
+
+
+def _persist_chapter_draft_binding(
+    service: ChapterService,
+    novel_id: str,
+    chapter: ChapterDTO,
+    draft_binding: dict[str, Any] | None,
+) -> None:
+    if not draft_binding:
+        return
+
+    repository = getattr(service, "chapter_draft_binding_repository", None)
+    if repository is None:
+        logger.warning(
+            "chapter draft binding repository unavailable novel_id=%s chapter_id=%s",
+            novel_id,
+            chapter.id,
+        )
+        return
+
+    normalized = service._normalize_draft_binding(draft_binding)
+    repository.upsert_binding(
+        chapter_id=chapter.id,
+        novel_id=novel_id,
+        draft_type=normalized["draft_type"],
+        draft_id=normalized["draft_id"],
+        plan_version=normalized["plan_version"],
+        state_lock_version=normalized["state_lock_version"],
+        source_fusion_id=normalized.get("source_fusion_id"),
+    )
+    logger.info(
+        "chapter save bound latest fusion novel_id=%s chapter_id=%s fusion_id=%s plan_version=%s state_lock_version=%s",
+        novel_id,
+        chapter.id,
+        normalized.get("source_fusion_id"),
+        normalized["plan_version"],
+        normalized["state_lock_version"],
+    )
+
+
+def _build_update_response(chapter: ChapterDTO, aftermath: dict[str, Any]) -> UpdateChapterResponse:
+    return UpdateChapterResponse(
+        id=chapter.id,
+        novel_id=chapter.novel_id,
+        number=chapter.number,
+        title=chapter.title,
+        content=chapter.content,
+        word_count=chapter.word_count,
+        status=chapter.status,
+        aftermath=ChapterAftermathStatusResponse(
+            narrative_sync_ok=bool(aftermath.get("narrative_sync_ok", False)),
+            voice_sync_ok=bool(aftermath.get("voice_sync_ok", True)),
+            kg_sync_ok=bool(aftermath.get("kg_sync_ok", True)),
+            local_sync_ok=bool(aftermath.get("local_sync_ok", False)),
+            local_sync_errors=[str(item) for item in aftermath.get("local_sync_errors", []) if str(item).strip()],
+            drift_alert=bool(aftermath.get("drift_alert", False)),
+            similarity_score=aftermath.get("similarity_score"),
+        ),
+    )
+
+
+@router.put("/{novel_id}/chapters/{chapter_number}", response_model=UpdateChapterResponse)
 async def update_chapter(
     novel_id: str,
     request: UpdateChapterContentRequest,
-    background_tasks: BackgroundTasks,
     chapter_number: int = Path(..., gt=0, description="章节编号"),
     service: ChapterService = Depends(get_chapter_service),
     pipeline: ChapterAftermathPipeline = Depends(get_chapter_aftermath_pipeline),
 ):
-    """更新章节内容，保存成功后后台执行统一章后管线（见 ChapterAftermathPipeline）。"""
+    """同步更新章节内容，并要求本地章后处理全部成功后才返回成功。"""
+    existing = service.get_chapter_by_novel_and_number(novel_id, chapter_number)
+    original_content = existing.content if existing else ""
+    draft_binding = _resolve_latest_fusion_draft_binding(service, pipeline, existing, request.draft_binding) if existing else None
     try:
         chapter = service.update_chapter_by_novel_and_number(
             novel_id,
             chapter_number,
             request.content,
             request.generation_metrics,
-            request.draft_binding.model_dump() if request.draft_binding else None,
+            None,
         )
     except EntityNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    content = request.content
-    background_tasks.add_task(
-        _run_chapter_aftermath,
-        novel_id,
-        chapter_number,
-        content,
-        pipeline,
-    )
-    return chapter
+    aftermath = await pipeline.run_after_chapter_saved(novel_id, chapter_number, request.content)
+    if not aftermath.get("local_sync_ok", False):
+        _rollback_chapter_content(service, novel_id, chapter_number, original_content)
+        errors = [str(item) for item in aftermath.get("local_sync_errors", []) if str(item).strip()]
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "保存失败：章后本地同步未完成，正文已回滚",
+                "aftermath": {
+                    "narrative_sync_ok": bool(aftermath.get("narrative_sync_ok", False)),
+                    "voice_sync_ok": bool(aftermath.get("voice_sync_ok", True)),
+                    "kg_sync_ok": bool(aftermath.get("kg_sync_ok", True)),
+                    "local_sync_ok": False,
+                    "local_sync_errors": errors,
+                },
+            },
+        )
+
+    _persist_chapter_draft_binding(service, novel_id, chapter, draft_binding)
+    return _build_update_response(chapter, aftermath)
 
 
 @router.get(

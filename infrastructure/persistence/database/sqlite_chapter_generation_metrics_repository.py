@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Any, Dict, Optional
 
 from infrastructure.persistence.database.connection import DatabaseConnection
@@ -10,6 +11,15 @@ from infrastructure.persistence.database.connection import DatabaseConnection
 class SqliteChapterGenerationMetricsRepository:
     def __init__(self, db: DatabaseConnection):
         self.db = db
+        self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        conn = self.db.get_connection()
+        cur = conn.execute("PRAGMA table_info(chapter_generation_metrics)")
+        cols = {row[1] for row in cur.fetchall()}
+        if cols and "beat_quality_json" not in cols:
+            conn.execute("ALTER TABLE chapter_generation_metrics ADD COLUMN beat_quality_json TEXT")
+            conn.commit()
 
     def get(self, novel_id: str, chapter_number: int) -> Optional[Dict[str, Any]]:
         row = self.db.fetch_one(
@@ -28,6 +38,7 @@ class SqliteChapterGenerationMetricsRepository:
                 expansion_attempts,
                 trim_applied,
                 fallback_used,
+                beat_quality_json,
                 created_at,
                 updated_at
             FROM chapter_generation_metrics
@@ -57,9 +68,10 @@ class SqliteChapterGenerationMetricsRepository:
                 expansion_attempts,
                 trim_applied,
                 fallback_used,
+                beat_quality_json,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(novel_id, chapter_number) DO UPDATE SET
                 generated_via = excluded.generated_via,
                 target_word_count = excluded.target_word_count,
@@ -72,6 +84,7 @@ class SqliteChapterGenerationMetricsRepository:
                 expansion_attempts = excluded.expansion_attempts,
                 trim_applied = excluded.trim_applied,
                 fallback_used = excluded.fallback_used,
+                beat_quality_json = excluded.beat_quality_json,
                 updated_at = excluded.updated_at
             """,
             (
@@ -88,6 +101,7 @@ class SqliteChapterGenerationMetricsRepository:
                 int(metrics.get("expansion_attempts", 0)),
                 1 if metrics.get("trim_applied") else 0,
                 1 if metrics.get("fallback_used") else 0,
+                self._serialize_json(metrics.get("beat_quality")),
                 now,
                 now,
             ),
@@ -140,8 +154,24 @@ class SqliteChapterGenerationMetricsRepository:
             "expansion_attempts": int(row.get("expansion_attempts") or 0),
             "trim_applied": bool(row.get("trim_applied")),
             "fallback_used": bool(row.get("fallback_used")),
+            "beat_quality": self._deserialize_json(row.get("beat_quality_json")),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
             "min_allowed": max(1, int((row.get("target_word_count") or 0) * (1 - float(row.get("tolerance") or 0.15)))),
             "max_allowed": max(1, int((row.get("target_word_count") or 0) * (1 + float(row.get("tolerance") or 0.15)))),
         }
+
+    @staticmethod
+    def _serialize_json(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=False)
+
+    @staticmethod
+    def _deserialize_json(value: Any) -> Optional[Any]:
+        if value in (None, ""):
+            return None
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return None

@@ -26,10 +26,12 @@ from application.engine.services.background_task_service import BackgroundTaskSe
 from application.workflows.auto_novel_generation_workflow import AutoNovelGenerationWorkflow
 from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
 from application.engine.services.style_constraint_builder import build_style_summary
+from application.engine.services.beat_quality import assess_beat_content, build_retry_suffix
 from application.engine.services.word_control_service import effective_length
 from application.ai.structured_json_pipeline import sanitize_llm_output, parse_and_repair_json
 from application.config import AppConfig
 from domain.novel.value_objects.chapter_id import ChapterId
+from infrastructure.persistence.database.sqlite_chapter_draft_binding_repository import SqliteChapterDraftBindingRepository
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ class AutopilotDaemon:
         volume_summary_service=None,
         foreshadowing_repository=None,
         chapter_generation_metrics_repository=None,
+        chapter_draft_binding_repository: Optional[SqliteChapterDraftBindingRepository] = None,
     ):
         self.novel_repository = novel_repository
         self.llm_service = llm_service
@@ -75,6 +78,7 @@ class AutopilotDaemon:
         self.foreshadowing_repository = foreshadowing_repository
         self.theme_agent = None  # ThemeAgent 插槽，由外部注入
         self.chapter_generation_metrics_repository = chapter_generation_metrics_repository
+        self.chapter_draft_binding_repository = chapter_draft_binding_repository
 
         # 惰性初始化 VolumeSummaryService
         if not self.volume_summary_service and llm_service and story_node_repo:
@@ -777,7 +781,9 @@ class AutopilotDaemon:
 
         use_wf = self.chapter_workflow is not None and bundle is not None
 
+        beat_quality_reports: List[Dict[str, Any]] = []
         if beats:
+            consecutive_failed_beats = 0
             for i, beat in enumerate(beats):
                 if i < start_beat:
                     continue  # 跳过已生成的节拍
@@ -788,7 +794,7 @@ class AutopilotDaemon:
 
                 beat_prompt = self.context_builder.build_beat_prompt(beat, i, len(beats))
                 if use_wf:
-                    prompt = self.chapter_workflow.build_chapter_prompt(
+                    base_prompt = self.chapter_workflow.build_chapter_prompt(
                         bundle["context"],
                         outline,
                         storyline_context=bundle["storyline_context"],
@@ -800,21 +806,67 @@ class AutopilotDaemon:
                         beat_target_words=int(beat.target_words),
                         voice_anchors=voice_anchors,
                     )
-                    prompt = self.chapter_workflow.word_control_service.inject_length_requirements(
-                        prompt,
-                        target=target_word_count,
+                    base_prompt = self.chapter_workflow.word_control_service.inject_length_requirements(
+                        base_prompt,
+                        target=int(beat.target_words),
                     )
-                    max_tokens = int(beat.target_words * 1.5)
-                    cfg = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
-                    beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
+                    best_content = ""
+                    quality_report = None
+                    for attempt in range(1, 3):
+                        prompt = base_prompt if attempt == 1 else self._build_beat_retry_prompt(base_prompt, quality_report)
+                        cfg = self._build_beat_generation_config(int(beat.target_words), retry=attempt > 1)
+                        candidate = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
+                        candidate = sanitize_llm_output(candidate).strip()
+                        if len(candidate) >= len(best_content):
+                            best_content = candidate
+                        quality_report = assess_beat_content(candidate, int(beat.target_words))
+                        if quality_report.passed:
+                            best_content = candidate
+                            break
+                    beat_content = best_content
+                    final_quality = assess_beat_content(beat_content, int(beat.target_words))
                 else:
                     beat_content = await self._stream_one_beat(
                         outline, context, beat_prompt, beat, novel=novel, voice_anchors=voice_anchors
                     )
+                    final_quality = assess_beat_content(beat_content, int(getattr(beat, "target_words", 0) or 0))
 
-                if beat_content.strip():
+                beat_quality_reports.append(
+                    {
+                        "beat_index": i,
+                        "focus": getattr(beat, "focus", ""),
+                        "target_words": int(getattr(beat, "target_words", 0) or 0),
+                        "char_count": final_quality.char_count,
+                        "paragraph_count": final_quality.paragraph_count,
+                        "sentence_count": final_quality.sentence_count,
+                        "has_dialogue": final_quality.has_dialogue,
+                        "has_action_verb": final_quality.has_action_verb,
+                        "passed": final_quality.passed,
+                        "failure_reasons": list(final_quality.failure_reasons),
+                    }
+                )
+
+                if final_quality.passed and beat_content.strip():
+                    consecutive_failed_beats = 0
                     chapter_content += ("\n\n" if chapter_content else "") + beat_content
                     await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="draft")
+                else:
+                    consecutive_failed_beats += 1
+                    logger.warning(
+                        "[%s] 节拍 %s/%s 质量未达标，跳过拼接: reasons=%s chars=%s",
+                        novel.novel_id,
+                        i + 1,
+                        len(beats),
+                        list(final_quality.failure_reasons),
+                        final_quality.char_count,
+                    )
+                    if consecutive_failed_beats >= 2:
+                        logger.warning(
+                            "[%s] 连续 %s 个节拍质量未达标，提前结束节拍写作并交给后续补写闭环",
+                            novel.novel_id,
+                            consecutive_failed_beats,
+                        )
+                        break
 
                 if not self._is_still_running(novel):
                     novel.current_beat_index = i
@@ -828,7 +880,11 @@ class AutopilotDaemon:
                 novel.current_beat_index = i + 1
                 self._flush_novel(novel)
 
-                logger.info(f"[{novel.novel_id}]    ✅ 节拍 {i+1}/{len(beats)} 完成: {len(beat_content)} 字")
+                logger.info(
+                    f"[{novel.novel_id}]    ✅ 节拍 {i+1}/{len(beats)} 完成: {len(beat_content)} 字"
+                    if final_quality.passed
+                    else f"[{novel.novel_id}]    ⚠️ 节拍 {i+1}/{len(beats)} 未通过质量门禁"
+                )
         else:
             # 降级：无节拍，一次生成
             if not self._is_still_running(novel):
@@ -879,6 +935,7 @@ class AutopilotDaemon:
                     word_control_metrics = serialized.to_dict() if serialized is not None else None
                     if word_control_metrics is not None:
                         word_control_metrics["generated_via"] = "autopilot"
+                        word_control_metrics["beat_quality"] = beat_quality_reports
             except Exception as e:
                 logger.warning(f"字数控制闭环失败（仍继续写作流程）：{e}")
         elif chapter_content.strip() and self.chapter_workflow:
@@ -902,8 +959,29 @@ class AutopilotDaemon:
                     "min_allowed": check.min_allowed,
                     "max_allowed": check.max_allowed,
                 }
+                word_control_metrics["beat_quality"] = beat_quality_reports
             except Exception:
                 word_control_metrics = None
+
+        if word_control_metrics and word_control_metrics.get("status") == "needs_expansion":
+            await self._upsert_chapter_content(
+                novel,
+                next_chapter_node,
+                chapter_content,
+                status="reviewing",
+                generation_metrics=word_control_metrics,
+            )
+            novel.autopilot_status = AutopilotStatus.STOPPED
+            novel.current_stage = NovelStage.WRITING
+            novel.last_audit_chapter_number = chapter_num
+            novel.last_audit_narrative_ok = False
+            novel.last_audit_at = datetime.now(timezone.utc).isoformat()
+            novel.last_audit_issues = [{
+                "type": "needs_expansion",
+                "message": "章节正文显著欠字且自动补写未达标，需要人工补写后再继续。",
+            }]
+            self._flush_novel(novel)
+            return
 
         if use_wf and chapter_content.strip():
             try:
@@ -1556,6 +1634,18 @@ class AutopilotDaemon:
             )
             return
 
+        if self._is_chapter_already_published_from_latest_fusion(novel, chapter):
+            logger.info(
+                "[%s] 章节 %s 已发布当前融合稿，跳过自动审计并继续写作",
+                novel.novel_id,
+                chapter_num,
+            )
+            novel.last_audit_chapter_number = chapter_num
+            novel.last_audit_narrative_ok = True
+            novel.last_audit_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            novel.current_stage = NovelStage.WRITING
+            return
+
         content = chapter.content or ""
         chapter_id = ChapterId(chapter.id)
 
@@ -1805,6 +1895,40 @@ class AutopilotDaemon:
         if last_audit_at is None or chapter_updated_at is None:
             return False
         return chapter_updated_at <= last_audit_at
+
+    def _is_chapter_already_published_from_latest_fusion(self, novel: Novel, chapter) -> bool:
+        if not self.chapter_draft_binding_repository or not self.aftermath_pipeline:
+            return False
+        fusion_service = getattr(self.aftermath_pipeline, "_chapter_fusion_service", None)
+        fusion_repository = getattr(fusion_service, "fusion_repository", None)
+        if fusion_repository is None:
+            return False
+
+        latest_draft = fusion_repository.get_latest_draft_for_chapter(chapter.id)
+        if latest_draft is None or not getattr(latest_draft, "fusion_id", None):
+            return False
+
+        binding = self.chapter_draft_binding_repository.get_binding(
+            chapter_id=chapter.id,
+            draft_type="merged",
+            draft_id="merged-current",
+        )
+        if binding is None:
+            return False
+
+        same_fusion = (binding.source_fusion_id or "") == (getattr(latest_draft, "fusion_id", "") or "")
+        same_plan = int(binding.plan_version or 0) == int(getattr(latest_draft, "plan_version", 0) or 0)
+        same_lock = int(binding.state_lock_version or 0) == int(getattr(latest_draft, "state_lock_version", 0) or 0)
+        if not (same_fusion and same_plan and same_lock):
+            return False
+
+        logger.info(
+            "[%s] chapter %s published binding matched latest fusion_id=%s",
+            novel.novel_id,
+            getattr(chapter, "number", None),
+            getattr(latest_draft, "fusion_id", ""),
+        )
+        return True
 
     def _similarity_below_warning_threshold(self, similarity_score: Any) -> bool:
         """展示告警阈值：宽松，用于提示。"""
@@ -2181,6 +2305,17 @@ class AutopilotDaemon:
         """推送增量文字到全局流式队列，供 SSE 接口消费"""
         from application.engine.services.streaming_bus import streaming_bus
         streaming_bus.publish(novel_id, chunk)
+
+    @staticmethod
+    def _build_beat_retry_prompt(prompt: Prompt, quality_report) -> Prompt:
+        return Prompt(system=prompt.system, user=prompt.user + build_retry_suffix(quality_report))
+
+    @staticmethod
+    def _build_beat_generation_config(target_words: int, *, retry: bool = False) -> GenerationConfig:
+        return GenerationConfig(
+            max_tokens=max(512, int(max(target_words, 1) * 1.5)),
+            temperature=0.55 if retry else 0.85,
+        )
 
     async def _stream_one_beat(
         self, outline, context, beat_prompt, beat, novel=None, voice_anchors: str = ""

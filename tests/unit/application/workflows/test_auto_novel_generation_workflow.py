@@ -1,6 +1,7 @@
 """AutoNovelGenerationWorkflow 单元测试"""
 import pytest
 from unittest.mock import Mock, AsyncMock
+from types import SimpleNamespace
 from application.workflows.auto_novel_generation_workflow import AutoNovelGenerationWorkflow
 from application.engine.dtos.generation_result import GenerationResult
 from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
@@ -11,6 +12,7 @@ from domain.novel.repositories.plot_arc_repository import PlotArcRepository
 from domain.novel.value_objects.consistency_report import ConsistencyReport, Issue, IssueType, Severity
 from domain.novel.value_objects.chapter_state import ChapterState
 from domain.ai.services.llm_service import LLMService, GenerationResult as LLMResult
+from domain.ai.services.llm_service import GenerationConfig
 from domain.ai.value_objects.token_usage import TokenUsage
 
 
@@ -190,7 +192,7 @@ class TestGenerateChapter:
         )
         assert result.word_control is not None
         assert result.word_control.target == 20
-        assert result.word_control.status in {"ok", "too_short", "too_long"}
+        assert result.word_control.status in {"ok", "too_short", "too_long", "needs_expansion"}
 
     @pytest.mark.asyncio
     async def test_generate_chapter_sanitizes_ai_thinking_content(self, workflow, mock_llm_service):
@@ -223,6 +225,55 @@ class TestGenerateChapter:
 
         assert result.content == "沈惊鸿的目光骤然收紧。"
         assert "当前字数" not in result.content
+
+    @pytest.mark.asyncio
+    async def test_generate_chapter_content_uses_beat_targets_and_skips_failed_beats(
+        self,
+        workflow,
+        mock_context_builder,
+        mock_llm_service,
+    ):
+        beats = [
+            SimpleNamespace(focus="开场", description="有效节拍", target_words=120),
+            SimpleNamespace(focus="失效一", description="无效节拍1", target_words=140),
+            SimpleNamespace(focus="失效二", description="无效节拍2", target_words=160),
+        ]
+        mock_context_builder.magnify_outline_to_beats.return_value = beats
+        mock_context_builder.build_beat_prompt.side_effect = ["beat-1", "beat-2", "beat-3"]
+        workflow.word_control_service.inject_length_requirements = Mock(side_effect=lambda prompt, target: prompt)
+        mock_llm_service.generate = AsyncMock(side_effect=[
+            LLMResult(
+                content=(
+                    "他抬手推门，冷声道：“进来。”寒意顺着门缝卷进来，烛火都跟着晃了一下。"
+                    "他向前一步，逼得对方后退半步，衣角擦过桌沿，发出一声闷响。"
+                    "屋里几个人同时收声，视线全压在那封刚拆开的密信上。"
+                ),
+                token_usage=TokenUsage(input_tokens=10, output_tokens=120),
+            ),
+            LLMResult(content="短句", token_usage=TokenUsage(input_tokens=10, output_tokens=5)),
+            LLMResult(content="仍短", token_usage=TokenUsage(input_tokens=10, output_tokens=2)),
+            LLMResult(content="仍然太短", token_usage=TokenUsage(input_tokens=10, output_tokens=5)),
+            LLMResult(content="还是短", token_usage=TokenUsage(input_tokens=10, output_tokens=3)),
+        ])
+
+        content, _ = await workflow._generate_chapter_content(
+            context="ctx",
+            outline="outline",
+            bundle={
+                "storyline_context": "",
+                "plot_tension": "",
+                "style_summary": "",
+                "voice_anchors": "",
+            },
+            config=GenerationConfig(max_tokens=600),
+            chapter_number=1,
+            enable_beats=True,
+            target_word_count=3000,
+        )
+
+        assert "他抬手推门" in content
+        assert "短句" not in content
+        assert [call.kwargs["target"] for call in workflow.word_control_service.inject_length_requirements.call_args_list] == [120, 140, 160]
 
 
 class TestGenerateChapterWithReview:

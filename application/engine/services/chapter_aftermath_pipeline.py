@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def infer_kg_from_chapter(novel_id: str, chapter_number: int) -> None:
+async def infer_kg_from_chapter(novel_id: str, chapter_number: int) -> bool:
     """结构树章节节点 → 知识图谱增量推断（与 HTTP 原 _try_infer_kg_chapter 一致）。"""
     try:
         from application.paths import get_db_path
@@ -43,7 +43,7 @@ async def infer_kg_from_chapter(novel_id: str, chapter_number: int) -> None:
         story_node_id = kr.find_story_node_id_for_chapter_number(novel_id, chapter_number)
         if not story_node_id:
             logger.debug("KG 推断跳过：章节 %d 无故事节点 novel=%s", chapter_number, novel_id)
-            return
+            return True
 
         kg_service = KnowledgeGraphService(
             TripleRepository(),
@@ -52,8 +52,10 @@ async def infer_kg_from_chapter(novel_id: str, chapter_number: int) -> None:
         )
         triples = await kg_service.infer_from_chapter(story_node_id)
         logger.debug("KG 推断完成 novel=%s ch=%d 新三元组=%d", novel_id, chapter_number, len(triples))
+        return True
     except Exception as e:
         logger.warning("KG 推断失败 novel=%s ch=%d: %s", novel_id, chapter_number, e)
+        return False
 
 
 class ChapterAftermathPipeline:
@@ -112,11 +114,16 @@ class ChapterAftermathPipeline:
             "drift_alert": False,
             "similarity_score": None,
             "narrative_sync_ok": False,
+            "voice_sync_ok": True,
+            "kg_sync_ok": True,
+            "local_sync_ok": False,
+            "local_sync_errors": [],
             "quality_gate_passed": True,
         }
 
         if not content or not str(content).strip():
             logger.debug("aftermath 跳过：正文为空 novel=%s ch=%s", novel_id, chapter_number)
+            out["local_sync_ok"] = True
             return out
 
         if run_quality_gate:
@@ -174,6 +181,7 @@ class ChapterAftermathPipeline:
             logger.warning(
                 "叙事同步/向量失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
             )
+            out["local_sync_errors"].append(f"叙事同步失败: {e}")
 
         # 2) 文风（落库 chapter_style_scores）
         # 支持 LLM 模式（异步）和统计模式（同步）
@@ -204,9 +212,15 @@ class ChapterAftermathPipeline:
                 )
             except Exception as e:
                 logger.warning("文风评分失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
+                out["voice_sync_ok"] = False
+                out["local_sync_errors"].append(f"文风评分失败: {e}")
 
         # 3) 结构树 KG 推断
-        await infer_kg_from_chapter(novel_id, chapter_number)
+        out["kg_sync_ok"] = await infer_kg_from_chapter(novel_id, chapter_number)
+        if not out["kg_sync_ok"]:
+            out["local_sync_errors"].append("知识图谱推断失败")
+
+        out["local_sync_ok"] = bool(out["narrative_sync_ok"] and out["voice_sync_ok"] and out["kg_sync_ok"])
 
         return out
 
@@ -280,7 +294,7 @@ class ChapterAftermathPipeline:
                 result.update(
                     {
                         "quality_gate_passed": False,
-                        "quality_gate_step": "validation",
+                        "quality_gate_step": "fusion",
                         "quality_gate_reason": "Chapter fusion service is unavailable",
                         "quality_gate_blockers": ["融合草稿不可用，无法执行重试"],
                     }
@@ -301,19 +315,18 @@ class ChapterAftermathPipeline:
 
             result["state_lock_version"] = int(getattr(draft, "state_lock_version", 0) or 0)
             result["plan_version"] = int(getattr(draft, "plan_version", 0) or 0)
-            result["fusion_id"] = getattr(draft, "fusion_id", "") or ""
             if result["state_lock_version"] <= 0:
                 result.update(
                     {
                         "quality_gate_passed": False,
-                        "quality_gate_step": "validation",
+                        "quality_gate_step": "fusion",
                         "quality_gate_reason": "Fusion draft is missing a valid state_lock_version",
                         "quality_gate_blockers": ["融合草稿缺少有效的 state_lock_version"],
                     }
                 )
                 return result
 
-        if quality_gate_mode == "full" and self._chapter_fusion_service is not None:
+        if self._chapter_fusion_service is not None and quality_gate_mode in {"full", "retry"}:
             try:
                 beat_sheet_repo = getattr(self._chapter_fusion_service, "beat_sheet_repository", None)
                 beat_sheet = await beat_sheet_repo.get_by_chapter_id(chapter.id) if beat_sheet_repo else None
@@ -407,44 +420,6 @@ class ChapterAftermathPipeline:
                         "quality_gate_step": "fusion",
                         "quality_gate_reason": str(exc),
                         "quality_gate_blockers": [f"融合草稿生成失败: {exc}"],
-                    }
-                )
-                return result
-        elif quality_gate_mode == "retry":
-            validation_service = getattr(self._chapter_fusion_service, "validation_service", None)
-            if validation_service is None:
-                result.update(
-                    {
-                        "quality_gate_passed": False,
-                        "quality_gate_step": "validation",
-                        "quality_gate_reason": "Validation service is unavailable",
-                        "quality_gate_blockers": ["校验服务不可用，无法执行重试"],
-                    }
-                )
-                return result
-
-            try:
-                report = await validation_service.auto_validate_fusion_draft(chapter.id, result["fusion_id"])
-                result["validation_report_id"] = report.report_id
-                result["validation_status"] = getattr(report, "status", "")
-                blocking_count = int(getattr(report, "blocking_issue_count", 0) or 0)
-                if blocking_count > 0:
-                    result.update(
-                        {
-                            "quality_gate_passed": False,
-                            "quality_gate_step": "validation",
-                            "quality_gate_reason": f"{blocking_count} blocking issue(s) remain",
-                            "quality_gate_blockers": [f"Validation 仍有 {blocking_count} 个阻断问题"],
-                        }
-                    )
-                    return result
-            except Exception as exc:
-                result.update(
-                    {
-                        "quality_gate_passed": False,
-                        "quality_gate_step": "validation",
-                        "quality_gate_reason": str(exc),
-                        "quality_gate_blockers": [f"Validation 重试失败: {exc}"],
                     }
                 )
                 return result

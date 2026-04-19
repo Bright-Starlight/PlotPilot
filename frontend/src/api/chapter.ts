@@ -12,6 +12,20 @@ export interface ChapterDTO {
   updated_at: string
 }
 
+export interface ChapterAftermathStatusDTO {
+  narrative_sync_ok: boolean
+  voice_sync_ok: boolean
+  kg_sync_ok: boolean
+  local_sync_ok: boolean
+  local_sync_errors: string[]
+  drift_alert: boolean
+  similarity_score: number | null
+}
+
+export interface UpdateChapterResponseDTO extends ChapterDTO {
+  aftermath: ChapterAftermathStatusDTO
+}
+
 export interface UpdateChapterRequest {
   content: string
   generation_metrics?: Record<string, unknown>
@@ -86,7 +100,7 @@ export const chapterApi = {
    * PUT /api/v1/novels/{novelId}/chapters/{chapterNumber}
    */
   updateChapter: (novelId: string, chapterNumber: number, data: UpdateChapterRequest) =>
-    apiClient.put<ChapterDTO>(`/novels/${novelId}/chapters/${chapterNumber}`, data) as Promise<ChapterDTO>,
+    apiClient.put<UpdateChapterResponseDTO>(`/novels/${novelId}/chapters/${chapterNumber}`, data) as Promise<UpdateChapterResponseDTO>,
 
   /**
    * Get chapter review

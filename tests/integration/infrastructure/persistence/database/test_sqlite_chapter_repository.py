@@ -46,3 +46,29 @@ def test_update_tension_dimensions_if_default_is_idempotent(tmp_path):
         assert unchanged.pacing_tension == dims.pacing_tension
     finally:
         db.close()
+
+
+def test_get_by_number_accepts_plain_novel_id_string(tmp_path):
+    db = DatabaseConnection(str(tmp_path / "test.db"))
+    try:
+        repo = SqliteChapterRepository(db)
+        db.execute(
+            "INSERT INTO novels (id, title, slug, target_chapters) VALUES (?, ?, ?, ?)",
+            ("novel-1", "Test Novel", "test-novel", 10),
+        )
+        chapter = Chapter(
+            id="ch-2",
+            novel_id=NovelId("novel-1"),
+            number=3,
+            title="第3章",
+            content="测试正文。",
+        )
+        repo.save(chapter)
+
+        saved = repo.get_by_number("novel-1", 3)
+
+        assert saved is not None
+        assert saved.number == 3
+        assert saved.title == "第3章"
+    finally:
+        db.close()

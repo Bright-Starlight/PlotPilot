@@ -14,6 +14,7 @@ from application.engine.services.word_control_service import (
     WordControlService,
     effective_length,
 )
+from application.engine.services.beat_quality import assess_beat_content, build_retry_suffix
 from application.engine.services.chapter_output_sanitizer import sanitize_chapter_output
 from application.analyst.services.state_extractor import StateExtractor
 from application.analyst.services.state_updater import StateUpdater
@@ -286,6 +287,27 @@ class AutoNovelGenerationWorkflow:
             max_allowed=metadata.max_allowed,
         )
 
+    @staticmethod
+    def _build_beat_retry_prompt(prompt: Prompt, quality_report) -> Prompt:
+        return Prompt(system=prompt.system, user=prompt.user + build_retry_suffix(quality_report))
+
+    @staticmethod
+    def _build_beat_generation_config(
+        base_config: GenerationConfig,
+        target_words: int,
+        *,
+        retry: bool = False,
+    ) -> GenerationConfig:
+        max_tokens = max(512, int(max(target_words, 1) * 1.5))
+        if getattr(base_config, "max_tokens", None):
+            max_tokens = min(int(base_config.max_tokens), max_tokens)
+        return GenerationConfig(
+            model=getattr(base_config, "model", None),
+            max_tokens=max_tokens,
+            temperature=0.55 if retry else min(getattr(base_config, "temperature", 0.7), 0.85),
+            response_format=getattr(base_config, "response_format", None),
+        )
+
     async def _generate_chapter_content(
         self,
         *,
@@ -312,10 +334,11 @@ class AutoNovelGenerationWorkflow:
 
         if enable_beats and beats:
             content_parts = []
+            consecutive_failed_beats = 0
             for i, beat in enumerate(beats):
                 beat_prompt_text = self.context_builder.build_beat_prompt(beat, i, len(beats))
                 logger.info(f"生成节拍 {i+1}/{len(beats)}: {beat.focus} - {beat.description[:50]}...")
-                prompt = self._build_prompt(
+                base_prompt = self._build_prompt(
                     context,
                     outline,
                     storyline_context=bundle["storyline_context"],
@@ -328,12 +351,42 @@ class AutoNovelGenerationWorkflow:
                     voice_anchors=bundle.get("voice_anchors") or "",
                 )
                 if target_word_count is not None:
-                    prompt = self.word_control_service.inject_length_requirements(
-                        prompt,
-                        target=target_word_count,
+                    base_prompt = self.word_control_service.inject_length_requirements(
+                        base_prompt,
+                        target=int(beat.target_words),
                     )
-                llm_result = await self.llm_service.generate(prompt, config)
-                content_parts.append(llm_result.content)
+                best_content = ""
+                quality_report = None
+                for attempt in range(1, 3):
+                    prompt = base_prompt if attempt == 1 else self._build_beat_retry_prompt(base_prompt, quality_report)
+                    beat_config = self._build_beat_generation_config(config, beat.target_words, retry=attempt > 1)
+                    llm_result = await self.llm_service.generate(prompt, beat_config)
+                    candidate = sanitize_chapter_output(llm_result.content or "")
+                    if len(candidate.strip()) >= len(best_content.strip()):
+                        best_content = candidate
+                    quality_report = assess_beat_content(candidate, beat.target_words)
+                    if quality_report.passed:
+                        best_content = candidate
+                        break
+                final_quality = assess_beat_content(best_content, beat.target_words)
+                if final_quality.passed and best_content.strip():
+                    consecutive_failed_beats = 0
+                    content_parts.append(best_content)
+                else:
+                    consecutive_failed_beats += 1
+                    logger.warning(
+                        "节拍 %s/%s 质量未达标，跳过拼接: reasons=%s chars=%s",
+                        i + 1,
+                        len(beats),
+                        list(final_quality.failure_reasons),
+                        final_quality.char_count,
+                    )
+                    if consecutive_failed_beats >= 2:
+                        logger.warning(
+                            "连续 %s 个节拍质量未达标，提前结束节拍生成并进入补写闭环",
+                            consecutive_failed_beats,
+                        )
+                        break
 
             content = "".join(content_parts)
             logger.info(f"  ✓ 节拍生成完成: {len(beats)} 个节拍, {len(content)} 字符")
@@ -389,8 +442,8 @@ class AutoNovelGenerationWorkflow:
                 }
             )
 
-        async def llm_caller(prompt: Prompt):
-            return await self.llm_service.generate(prompt, GenerationConfig())
+        async def llm_caller(prompt: Prompt, config: GenerationConfig):
+            return await self.llm_service.generate(prompt, config)
 
         result = await generate_with_word_control(
             prompt=Prompt(
@@ -617,11 +670,12 @@ class AutoNovelGenerationWorkflow:
             if enable_beats and beats:
                 # 按节拍生成
                 content_parts = []
+                consecutive_failed_beats = 0
                 for i, beat in enumerate(beats):
                     beat_prompt_text = self.context_builder.build_beat_prompt(beat, i, len(beats))
                     logger.info(f"生成节拍 {i+1}/{len(beats)}: {beat.focus} - {beat.description[:50]}...")
-                    
-                    prompt = self._build_prompt(
+
+                    base_prompt = self._build_prompt(
                         context,
                         outline,
                         storyline_context=bundle["storyline_context"],
@@ -634,24 +688,78 @@ class AutoNovelGenerationWorkflow:
                         voice_anchors=bundle.get("voice_anchors") or "",
                     )
                     if target_word_count is not None:
-                        prompt = self.word_control_service.inject_length_requirements(
-                            prompt,
-                            target=target_word_count,
+                        base_prompt = self.word_control_service.inject_length_requirements(
+                            base_prompt,
+                            target=int(beat.target_words),
                         )
-                    
-                    beat_content = ""
-                    async for piece in self.llm_service.stream_generate(prompt, config):
-                        chunk_count += 1
-                        beat_content += piece
+
+                    best_content = ""
+                    quality_report = None
+                    for attempt in range(1, 3):
+                        prompt = base_prompt if attempt == 1 else self._build_beat_retry_prompt(base_prompt, quality_report)
+                        beat_config = self._build_beat_generation_config(config, beat.target_words, retry=attempt > 1)
+                        beat_content = ""
+                        async for piece in self.llm_service.stream_generate(prompt, beat_config):
+                            chunk_count += 1
+                            beat_content += piece
+                            yield {
+                                "type": "chunk",
+                                "text": piece,
+                                "beat_index": i,
+                                "beat_focus": beat.focus,
+                                "beat_attempt": attempt,
+                            }
+
+                        candidate = sanitize_chapter_output(beat_content)
+                        if len(candidate.strip()) >= len(best_content.strip()):
+                            best_content = candidate
+                        quality_report = assess_beat_content(candidate, beat.target_words)
+                        if quality_report.passed:
+                            best_content = candidate
+                            break
+                        if attempt < 2:
+                            yield {
+                                "type": "beat_retry",
+                                "beat_index": i,
+                                "beat_attempt": attempt + 1,
+                                "quality": {
+                                    "char_count": quality_report.char_count,
+                                    "paragraph_count": quality_report.paragraph_count,
+                                    "sentence_count": quality_report.sentence_count,
+                                    "has_dialogue": quality_report.has_dialogue,
+                                    "has_action_verb": quality_report.has_action_verb,
+                                    "failure_reasons": list(quality_report.failure_reasons),
+                                },
+                            }
+
+                    final_quality = assess_beat_content(best_content, beat.target_words)
+                    if final_quality.passed:
+                        consecutive_failed_beats = 0
+                        content_parts.append(best_content)
+                    else:
+                        consecutive_failed_beats += 1
                         yield {
-                            "type": "chunk", 
-                            "text": piece,
+                            "type": "beat_quality_fallback",
                             "beat_index": i,
-                            "beat_focus": beat.focus
+                            "failure_reasons": list(final_quality.failure_reasons),
+                            "consecutive_failed_beats": consecutive_failed_beats,
                         }
-                    
-                    content_parts.append(beat_content)
-                    yield {"type": "beat_done", "beat_index": i, "beat_content_length": len(beat_content)}
+                    yield {
+                        "type": "beat_done",
+                        "beat_index": i,
+                        "beat_content_length": len(best_content),
+                        "quality": {
+                            "char_count": final_quality.char_count,
+                            "paragraph_count": final_quality.paragraph_count,
+                            "sentence_count": final_quality.sentence_count,
+                            "has_dialogue": final_quality.has_dialogue,
+                            "has_action_verb": final_quality.has_action_verb,
+                            "failure_reasons": list(final_quality.failure_reasons),
+                            "passed": final_quality.passed,
+                        },
+                    }
+                    if consecutive_failed_beats >= 2:
+                        break
                 
                 content = "".join(content_parts)
             else:

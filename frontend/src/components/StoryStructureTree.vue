@@ -82,6 +82,7 @@
 <script setup lang="ts">
 import { ref, computed, h, onMounted, onUnmounted, watch } from 'vue'
 import { NTree, NEmpty, NSpin, NTag, NButton, NSpace, NDropdown, NModal, NInput, useMessage, useDialog } from 'naive-ui'
+import { useRouter } from 'vue-router'
 import { structureApi, type StoryNode } from '@/api/structure'
 import { chapterApi } from '@/api/chapter'
 
@@ -99,6 +100,7 @@ const emit = defineEmits<{
 
 const message = useMessage()
 const dialog = useDialog()
+const router = useRouter()
 
 // 容器宽度响应式
 // 只有在极窄侧栏时才隐藏章节状态/字数，避免正常工作台宽度下丢失关键信息。
@@ -320,6 +322,11 @@ function resolveBookChapterNumber(node: StoryNode): number | null {
   return null
 }
 
+function openChapterEditor(chapterNumber: number, event?: MouseEvent) {
+  event?.stopPropagation()
+  void router.push(`/book/${props.slug}/chapter/${chapterNumber}`)
+}
+
 const handleSelect = (keys: string[]) => {
   if (!keys.length) return
   const findNode = (nodes: StoryNode[], id: string): StoryNode | null => {
@@ -465,6 +472,19 @@ const renderSuffix = ({ option }: { option: any }) => {
   // 窄屏模式下隐藏 "幕" 和 "章" 后面的统计信息
   if (isNarrow.value && (node.node_type === 'act' || node.node_type === 'chapter')) {
     return null
+  }
+  if (node.node_type === 'chapter') {
+    const chapterNumber = resolveBookChapterNumber(node)
+    if (chapterNumber != null) {
+      elements.push(
+        h(NButton, {
+          size: 'tiny',
+          quaternary: true,
+          style: { marginLeft: '8px' },
+          onClick: (event: MouseEvent) => openChapterEditor(chapterNumber, event),
+        }, () => '编辑')
+      )
+    }
   }
   // 章节节点显示字数
   if (node.node_type === 'chapter' && node.word_count) {

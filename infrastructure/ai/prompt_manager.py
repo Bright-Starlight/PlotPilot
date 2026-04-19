@@ -300,8 +300,8 @@ class PromptManager:
         db_path = str(Path(__file__).resolve().parent.parent.parent / "data" / "aitext.db")
         # 尝试从已有连接池获取
         try:
-            from interfaces.api.dependencies import get_db as _get_global_db
-            return _get_global_db()
+            from interfaces.api.dependencies import get_database
+            return get_database()
         except Exception:
             pass
         return DatabaseConnection(db_path)

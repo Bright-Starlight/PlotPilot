@@ -42,6 +42,13 @@ def _build_pipeline(blocking_issue_count: int = 0):
     )
 
     fusion_service = Mock()
+    fusion_service.fusion_repository = Mock()
+    fusion_service.fusion_repository.get_latest_draft_for_chapter.return_value = SimpleNamespace(
+        fusion_id="fd-stale",
+        state_lock_version=2,
+        plan_version=3,
+        latest_validation_report_id="vr-stale",
+    )
     fusion_service.beat_sheet_repository = Mock()
     fusion_service.beat_sheet_repository.get_by_chapter_id = AsyncMock(
         return_value=SimpleNamespace(
@@ -214,3 +221,29 @@ async def test_run_after_chapter_saved_skips_quality_gate_by_default():
     fusion_service.run_job.assert_not_awaited()
     sync_mock.assert_awaited_once()
     kg_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_quality_gate_retry_regenerates_fusion_before_validation():
+    pipeline, state_lock_service, fusion_service, beat_sheet_service = _build_pipeline(blocking_issue_count=0)
+
+    result = await pipeline._run_quality_gate(
+        "novel-1",
+        1,
+        "章节正文",
+        quality_gate_mode="retry",
+    )
+
+    assert result["quality_gate_passed"] is True
+    assert result["quality_gate_mode"] == "retry"
+    assert result["fusion_id"] == "fd-1"
+    assert result["validation_report_id"] == "vr-1"
+    state_lock_service.generate_state_locks.assert_not_awaited()
+    beat_sheet_service.generate_beat_sheet.assert_awaited_once_with(
+        chapter_id="chapter-1",
+        outline="旧大纲",
+        plan_version=3,
+        state_lock_version=2,
+    )
+    fusion_service.create_job.assert_called_once()
+    fusion_service.run_job.assert_awaited_once()

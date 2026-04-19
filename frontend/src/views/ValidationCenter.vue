@@ -58,6 +58,19 @@
           <n-tag size="small" round>P2 {{ latestReport.p2_count }}</n-tag>
           <n-tag size="small" round>Token {{ latestReport.token_usage.total_tokens }}</n-tag>
         </n-space>
+        <template #action>
+          <n-space :size="8">
+            <n-button
+              v-if="!latestReport.passed && latestReport.blocking_issue_count > 0"
+              type="warning"
+              size="small"
+              :loading="publishLoading"
+              @click="handleManualPublish"
+            >
+              人工发布
+            </n-button>
+          </n-space>
+        </template>
       </n-card>
 
       <n-card size="small" :bordered="true">
@@ -153,17 +166,19 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useMessage } from 'naive-ui'
+import { useDialog, useMessage } from 'naive-ui'
 import { chapterApi } from '../api/chapter'
 import { validationReportsApi, type ValidationIssueDTO, type ValidationReportDetailDTO } from '../api/validationReports'
 
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const dialog = useDialog()
 
 const slug = route.params.slug as string
 const loading = ref(false)
 const actionLoading = ref(false)
+const publishLoading = ref(false)
 const errorMessage = ref('')
 const latestReport = ref<ValidationReportDetailDTO | null>(null)
 const issues = ref<ValidationIssueDTO[]>([])
@@ -266,7 +281,13 @@ async function syncChapterFromRoute() {
 async function changeStatus(issueId: string, status: 'unresolved' | 'resolved' | 'ignored') {
   actionLoading.value = true
   try {
-    await validationReportsApi.updateValidationIssue(issueId, status)
+    const updated = await validationReportsApi.updateValidationIssue(issueId, status)
+    issues.value = issues.value.map(issue => (issue.issue_id === updated.issue_id ? updated : issue))
+
+    if (latestReport.value) {
+      await loadLatestReport(latestReport.value.chapter_id)
+    }
+
     message.success('问题状态已更新')
     await loadIssues()
   } catch (error) {
@@ -306,6 +327,40 @@ function getApiErrorMessage(error: unknown): string {
     if (typeof message === 'string') return message
   }
   return ''
+}
+
+async function handleManualPublish() {
+  if (!latestReport.value) return
+
+  dialog.warning({
+    title: '确认发布章节',
+    content: `当前章节存在 ${latestReport.value.blocking_issue_count} 个阻塞性问题。发布后，融合草稿内容将替换章节正文。此操作不可撤销。`,
+    positiveText: '确认发布',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      publishLoading.value = true
+      try {
+        const result = await validationReportsApi.manualPublish(latestReport.value!.chapter_id)
+
+        if (result.info_sync_completed) {
+          message.success('章节发布成功')
+        } else {
+          message.warning(
+            `章节发布成功，但信息同步失败：${result.info_sync_error || '未知错误'}`,
+            { duration: 5000 }
+          )
+        }
+
+        await loadIssues()
+        await loadLatestReport(latestReport.value!.chapter_id)
+      } catch (error) {
+        const detail = getApiErrorMessage(error) || (error instanceof Error ? error.message : '')
+        message.error(detail || '章节发布失败')
+      } finally {
+        publishLoading.value = false
+      }
+    }
+  })
 }
 
 watch([chapterFilter, severityFilter, statusFilter], () => {

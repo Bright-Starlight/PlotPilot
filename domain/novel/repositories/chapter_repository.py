@@ -19,6 +19,11 @@ class ChapterRepository(ABC):
         pass
 
     @abstractmethod
+    def get_by_number(self, novel_id: NovelId, number: int) -> Optional[Chapter]:
+        """根据小说 ID 和章节号获取章节"""
+        pass
+
+    @abstractmethod
     def list_by_novel(self, novel_id: NovelId) -> List[Chapter]:
         """
         列出小说的所有章节

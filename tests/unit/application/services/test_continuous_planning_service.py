@@ -7,6 +7,7 @@ from application.blueprint.services.continuous_planning_service import (
     _extract_outer_json_value,
     get_macro_plan_progress,
 )
+from domain.novel.entities.chapter import Chapter
 
 
 def _make_service() -> ContinuousPlanningService:
@@ -191,3 +192,53 @@ async def test_generate_macro_plan_precise_mode_repairs_missing_act_fields_and_r
     assert progress["status"] == "completed"
     assert progress["current"] == 5
     assert progress["total"] == 5
+
+
+@pytest.mark.asyncio
+async def test_confirm_act_planning_persists_description_and_timeline_fields():
+    story_node_repo = Mock()
+    chapter_element_repo = Mock()
+    chapter_repository = Mock()
+    act_node = Mock()
+    act_node.id = "act-1"
+    act_node.novel_id = "novel-1"
+    act_node.order_index = 10
+    act_node.number = 1
+    story_node_repo.get_by_id = AsyncMock(return_value=act_node)
+    story_node_repo.get_children_sync.return_value = []
+    story_node_repo.save_batch = AsyncMock()
+    story_node_repo.update = AsyncMock()
+    chapter_element_repo.save_batch = AsyncMock()
+    chapter_element_repo.delete_by_chapter = AsyncMock()
+    chapter_repository.list_by_novel.return_value = []
+
+    service = ContinuousPlanningService(
+        story_node_repo=story_node_repo,
+        chapter_element_repo=chapter_element_repo,
+        llm_service=Mock(),
+        chapter_repository=chapter_repository,
+    )
+
+    result = await service.confirm_act_planning(
+        "act-1",
+        [
+            {
+                "number": "1",
+                "title": "密报惊变",
+                "description": "顾玄音收到密报，决定南下。",
+                "outline": "承接上一章觉醒后的震荡，转入南下调查。",
+                "timeline_start": "残魂关废墟，命簿前",
+                "timeline_end": "北京城，准备南下",
+            }
+        ],
+    )
+
+    assert result["success"] is True
+    saved_node = story_node_repo.save_batch.await_args.args[0][0]
+    assert saved_node.description == "顾玄音收到密报，决定南下。"
+    assert saved_node.timeline_start == "残魂关废墟，命簿前"
+    assert saved_node.timeline_end == "北京城，准备南下"
+
+    saved_chapter = chapter_repository.save.call_args.args[0]
+    assert isinstance(saved_chapter, Chapter)
+    assert saved_chapter.id == "chapter-novel-1-chapter-1"

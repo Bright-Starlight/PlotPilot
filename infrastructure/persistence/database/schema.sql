@@ -521,6 +521,7 @@ CREATE TABLE IF NOT EXISTS chapter_generation_metrics (
     expansion_attempts INTEGER NOT NULL DEFAULT 0,
     trim_applied INTEGER NOT NULL DEFAULT 0,
     fallback_used INTEGER NOT NULL DEFAULT 0,
+    beat_quality_json TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (novel_id, chapter_number),

@@ -69,6 +69,11 @@ class SqliteChapterRepository(ChapterRepository):
 
         return self._row_to_chapter(row)
 
+    def get_by_number(self, novel_id: NovelId | str, number: int) -> Optional[Chapter]:
+        """根据小说 ID 和章节号获取章节。"""
+        normalized_novel_id = novel_id if isinstance(novel_id, NovelId) else NovelId(str(novel_id))
+        return self.get_by_novel_and_number(normalized_novel_id, number)
+
     def get_by_novel_and_number(self, novel_id: NovelId, number: int) -> Optional[Chapter]:
         """根据小说 ID 和章节号获取章节"""
         sql = "SELECT * FROM chapters WHERE novel_id = ? AND number = ?"

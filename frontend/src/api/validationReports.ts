@@ -66,6 +66,17 @@ export interface ValidationRepairPatchDTO {
   source: string
 }
 
+export interface ManualPublishResponse {
+  chapter_id: string
+  fusion_id: string
+  plan_version: number
+  state_lock_version: number
+  text_length: number
+  published: boolean
+  info_sync_completed: boolean
+  info_sync_error: string | null
+}
+
 export const validationReportsApi = {
   startValidation: (chapterId: string, data: StartValidationRequest) =>
     apiClient.post<ValidationReportSummaryDTO>(`/chapters/${chapterId}/validate`, data) as Promise<ValidationReportSummaryDTO>,
@@ -99,4 +110,7 @@ export const validationReportsApi = {
 
   checkPublishable: (chapterId: string) =>
     apiClient.post<PublishGateDTO>(`/chapters/${chapterId}/publish-check`, {}) as Promise<PublishGateDTO>,
+
+  manualPublish: (chapterId: string) =>
+    apiClient.post<ManualPublishResponse>(`/chapters/${chapterId}/manual-publish`, {}) as Promise<ManualPublishResponse>,
 }

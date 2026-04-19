@@ -191,11 +191,12 @@ class BeatSheetService:
         if chapter_number > 1:
             try:
                 prev_chapter = self.chapter_repo.get_by_number(novel_id, chapter_number - 1)
-                if prev_chapter and hasattr(prev_chapter, 'state') and prev_chapter.state:
+                prev_state = getattr(prev_chapter, "state", None) if prev_chapter else None
+                if prev_chapter and prev_state:
                     context["previous_chapter"] = {
-                        "number": prev_chapter.chapter_number,
+                        "number": getattr(prev_chapter, "number", chapter_number - 1),
                         "title": prev_chapter.title,
-                        "summary": getattr(prev_chapter.state, "summary", "")[:200]
+                        "summary": getattr(prev_state, "summary", "")[:200]
                     }
                     logger.info(f"Retrieved previous chapter state")
             except Exception as e:
@@ -236,8 +237,8 @@ class BeatSheetService:
 
                 context["timeline_events"] = [
                     {
-                        "description": event.description,
-                        "time_type": event.time_type,
+                        "description": getattr(event, "description", None) or getattr(event, "event", ""),
+                        "time_type": getattr(event, "time_type", None) or getattr(event, "timestamp_type", ""),
                         "chapter": event.chapter_number
                     }
                     for event in recent_events

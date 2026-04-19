@@ -39,6 +39,7 @@ from infrastructure.persistence.database.sqlite_storyline_repository import Sqli
 from infrastructure.persistence.database.sqlite_plot_arc_repository import SqlitePlotArcRepository
 from infrastructure.persistence.database.sqlite_chapter_generation_metrics_repository import SqliteChapterGenerationMetricsRepository
 from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
+from infrastructure.persistence.database.sqlite_chapter_draft_binding_repository import SqliteChapterDraftBindingRepository
 
 from application.engine.services.autopilot_daemon import AutopilotDaemon
 from application.engine.services.background_task_service import BackgroundTaskService
@@ -169,6 +170,7 @@ def build_daemon() -> AutopilotDaemon:
         chapter_workflow=chapter_workflow,
         aftermath_pipeline=aftermath_pipeline,
         chapter_generation_metrics_repository=SqliteChapterGenerationMetricsRepository(get_database()),
+        chapter_draft_binding_repository=SqliteChapterDraftBindingRepository(get_database()),
     )
 
 

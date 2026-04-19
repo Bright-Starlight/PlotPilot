@@ -145,6 +145,26 @@ class TestAnthropicProvider:
         assert json.loads(result.content) == {"summary": "ok", "count": 2}
 
     @pytest.mark.asyncio
+    async def test_generate_accepts_nested_content_lists(self, provider):
+        """测试嵌套 content 列表仍可提取正文。"""
+        prompt = Prompt(system="You are helpful", user="Hello")
+        config = GenerationConfig()
+
+        provider.async_client.messages.create = AsyncMock(return_value=Mock(
+            content=[
+                Mock(type="message", content=[
+                    {"type": "text", "text": "第一段"},
+                    {"type": "text", "text": "第二段"},
+                ])
+            ],
+            usage=Mock(input_tokens=10, output_tokens=5)
+        ))
+
+        result = await provider.generate(prompt, config)
+
+        assert result.content == "第一段\n第二段"
+
+    @pytest.mark.asyncio
     async def test_generate_empty_content(self, provider):
         """测试 API 返回空 content"""
         prompt = Prompt(system="You are helpful", user="Hello")

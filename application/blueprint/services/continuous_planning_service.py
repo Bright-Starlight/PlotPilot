@@ -912,8 +912,11 @@ class ContinuousPlanningService:
                 order_index=act_node.order_index + 1 + idx,
                 planning_status=PlanningStatus.CONFIRMED,
                 planning_source=PlanningSource.AI_ACT,
+                description=row.get("description"),
                 outline=row.get("outline"),
                 pov_character_id=row.get("pov_character_id"),
+                timeline_start=row.get("timeline_start"),
+                timeline_end=row.get("timeline_end"),
             )
             created_chapters.append(chapter_node)
 
@@ -1156,16 +1159,34 @@ class ContinuousPlanningService:
             num_int = int(num) if num is not None else act_local_index
         except (TypeError, ValueError):
             num_int = act_local_index
+        description = raw.get("description")
+        if isinstance(description, str):
+            description = description.strip() or None
+        else:
+            description = None
         outline = raw.get("outline") or raw.get("description") or ""
         if isinstance(outline, str):
             outline = outline.strip() or None
         else:
             outline = None
+        timeline_start = raw.get("timeline_start")
+        if isinstance(timeline_start, str):
+            timeline_start = timeline_start.strip() or None
+        else:
+            timeline_start = None
+        timeline_end = raw.get("timeline_end")
+        if isinstance(timeline_end, str):
+            timeline_end = timeline_end.strip() or None
+        else:
+            timeline_end = None
         return {
             **raw,
             "number": num_int,
             "title": title,
+            "description": description,
             "outline": outline,
+            "timeline_start": timeline_start,
+            "timeline_end": timeline_end,
         }
 
     def _merged_elements_dict(self, chapter_row: Dict) -> Dict:
@@ -1947,7 +1968,10 @@ class ContinuousPlanningService:
     {{
       "number": 1,
       "title": "章节标题",
+      "description": "章节简介（1-2句）",
       "outline": "章节大纲（100-200字）",
+      "timeline_start": "本章开场时的时间/地点/状态，可留空",
+      "timeline_end": "本章结尾时的时间/地点/状态，可留空；若无法确定不要编造",
       "characters": ["人物ID"],
       "locations": ["地点ID"]
     }}

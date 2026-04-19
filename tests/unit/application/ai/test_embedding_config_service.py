@@ -15,7 +15,7 @@ from interfaces.api.v1.core.settings import embedding_router
 
 def test_embedding_config_service_prefers_global_db(monkeypatch):
     fake_db = object()
-    fake_dependencies = SimpleNamespace(get_db=lambda: fake_db)
+    fake_dependencies = SimpleNamespace(get_database=lambda: fake_db)
     monkeypatch.setitem(sys.modules, "interfaces.api.dependencies", fake_dependencies)
 
     service = EmbeddingConfigService()

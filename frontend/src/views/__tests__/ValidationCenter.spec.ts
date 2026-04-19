@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
     success: vi.fn(),
     error: vi.fn(),
   },
+  dialog: {
+    warning: vi.fn(),
+  },
 }))
 
 const routeState = vi.hoisted(() => ({
@@ -31,6 +34,7 @@ vi.mock('vue-router', () => ({
 
 vi.mock('naive-ui', async () => ({
   useMessage: () => mocks.message,
+  useDialog: () => mocks.dialog,
 }))
 
 vi.mock('@/api/chapter', () => ({
@@ -150,14 +154,17 @@ describe('ValidationCenter', () => {
   })
 
   it('supports issue actions and chapter navigation', async () => {
+    routeState.query.chapter_id = 'chapter-1'
     const wrapper = mountView()
     await flushPromises()
+    routeState.query = {}
 
     await (wrapper.vm as unknown as { openChapter: (chapterId: string) => void }).openChapter('chapter-1')
     expect(mocks.routerPush).toHaveBeenCalledWith('/book/novel-1/chapter/1')
 
     await (wrapper.vm as unknown as { changeStatus: (issueId: string, status: 'resolved') => Promise<void> }).changeStatus('vi-1', 'resolved')
     expect(mocks.updateValidationIssue).toHaveBeenCalledWith('vi-1', 'resolved')
+    expect(mocks.getLatestValidationReport).toHaveBeenCalledWith('chapter-1', { draftType: 'fusion' })
 
     await (wrapper.vm as unknown as { generatePatch: (issueId: string) => Promise<void> }).generatePatch('vi-1')
     await flushPromises()

@@ -29,6 +29,10 @@ def _extract_text_from_content_block(block: Any) -> str:
     if isinstance(block, str):
         return block
 
+    if isinstance(block, (list, tuple)):
+        parts = [_extract_text_from_content_block(item) for item in block]
+        return "\n".join(part.strip() for part in parts if isinstance(part, str) and part.strip()).strip()
+
     text = getattr(block, "text", None)
     if isinstance(text, str) and text.strip():
         return text
@@ -39,6 +43,10 @@ def _extract_text_from_content_block(block: Any) -> str:
             continue
         if isinstance(value, str) and value.strip():
             return value
+        if isinstance(value, (list, tuple)):
+            nested = _extract_text_from_content_block(value)
+            if nested:
+                return nested
         if value is not None and attr in {"input", "arguments", "content", "json"} and _is_json_like(value):
             try:
                 return json.dumps(value, ensure_ascii=False)
@@ -52,6 +60,10 @@ def _extract_text_from_content_block(block: Any) -> str:
             value = block.get(key)
             if isinstance(value, str) and value.strip():
                 return value
+            if isinstance(value, (list, tuple)):
+                nested = _extract_text_from_content_block(value)
+                if nested:
+                    return nested
             if value is not None and key in {"content", "input", "arguments"} and _is_json_like(value):
                 try:
                     return json.dumps(value, ensure_ascii=False)

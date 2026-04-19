@@ -69,6 +69,7 @@ logger = logging.getLogger(__name__)
 
 # 全局存储实例
 _storage = None
+_quality_gate_services = None
 
 
 
@@ -238,44 +239,93 @@ def get_chapter_service() -> ChapterService:
     )
 
 
+def _build_quality_gate_services():
+    """Build the validation/fusion/aftermath services once and wire their circular references explicitly."""
+    global _quality_gate_services
+    if _quality_gate_services is not None:
+        return _quality_gate_services
+
+    db = get_database()
+    chapter_repository = get_chapter_repository()
+    story_node_repository = get_story_node_repository()
+    knowledge_service = get_knowledge_service()
+    bible_service = get_bible_service()
+    llm_service = get_llm_service()
+    state_lock_service = StateLockService(
+        chapter_repository=chapter_repository,
+        story_node_repository=story_node_repository,
+        knowledge_service=knowledge_service,
+        bible_service=bible_service,
+        state_lock_repository=SqliteStateLockRepository(db),
+        fusion_repository=SqliteChapterFusionRepository(db),
+        llm_service=llm_service,
+    )
+    validation_service = ValidationService(
+        chapter_repository=chapter_repository,
+        fusion_repository=SqliteChapterFusionRepository(db),
+        state_lock_service=state_lock_service,
+        validation_repository=SqliteValidationRepository(db),
+        chapter_draft_binding_repository=SqliteChapterDraftBindingRepository(db),
+        story_node_repository=story_node_repository,
+        knowledge_service=knowledge_service,
+        bible_service=bible_service,
+        llm_service=llm_service,
+        aftermath_pipeline=None,
+    )
+    chapter_fusion_service = ChapterFusionService(
+        chapter_repository=chapter_repository,
+        beat_sheet_repository=SqliteBeatSheetRepository(db),
+        fusion_repository=SqliteChapterFusionRepository(db),
+        state_lock_repository=SqliteStateLockRepository(db),
+        llm_service=llm_service,
+        validation_service=validation_service,
+    )
+
+    from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
+    from infrastructure.persistence.database.triple_repository import TripleRepository
+    from infrastructure.persistence.database.sqlite_storyline_repository import SqliteStorylineRepository
+    from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
+
+    aftermath_pipeline = ChapterAftermathPipeline(
+        knowledge_service=knowledge_service,
+        chapter_indexing_service=get_chapter_indexing_service(),
+        llm_service=llm_service,
+        voice_drift_service=get_voice_drift_service(),
+        triple_repository=TripleRepository(),
+        foreshadowing_repository=get_foreshadowing_repository(),
+        storyline_repository=SqliteStorylineRepository(db),
+        chapter_repository=chapter_repository,
+        plot_arc_repository=get_plot_arc_repository(),
+        narrative_event_repository=SqliteNarrativeEventRepository(db),
+        novel_repository=get_novel_repository(),
+        state_lock_service=state_lock_service,
+        chapter_fusion_service=chapter_fusion_service,
+        beat_sheet_service=get_beat_sheet_service(),
+    )
+
+    validation_service.aftermath_pipeline = aftermath_pipeline
+    _quality_gate_services = {
+        "state_lock_service": state_lock_service,
+        "validation_service": validation_service,
+        "chapter_fusion_service": chapter_fusion_service,
+        "aftermath_pipeline": aftermath_pipeline,
+    }
+    return _quality_gate_services
+
+
 def get_chapter_fusion_service() -> ChapterFusionService:
     """获取章节融合服务。"""
-    return ChapterFusionService(
-        chapter_repository=get_chapter_repository(),
-        beat_sheet_repository=SqliteBeatSheetRepository(get_database()),
-        fusion_repository=SqliteChapterFusionRepository(get_database()),
-        state_lock_repository=SqliteStateLockRepository(get_database()),
-        llm_service=get_llm_service(),
-        validation_service=get_validation_service(),
-    )
+    return _build_quality_gate_services()["chapter_fusion_service"]
 
 
 def get_state_lock_service() -> StateLockService:
     """获取章节状态锁服务。"""
-    return StateLockService(
-        chapter_repository=get_chapter_repository(),
-        story_node_repository=get_story_node_repository(),
-        knowledge_service=get_knowledge_service(),
-        bible_service=get_bible_service(),
-        state_lock_repository=SqliteStateLockRepository(get_database()),
-        fusion_repository=SqliteChapterFusionRepository(get_database()),
-        llm_service=get_llm_service(),
-    )
+    return _build_quality_gate_services()["state_lock_service"]
 
 
 def get_validation_service() -> ValidationService:
     """获取章节校验服务。"""
-    return ValidationService(
-        chapter_repository=get_chapter_repository(),
-        fusion_repository=SqliteChapterFusionRepository(get_database()),
-        state_lock_service=get_state_lock_service(),
-        validation_repository=SqliteValidationRepository(get_database()),
-        chapter_draft_binding_repository=SqliteChapterDraftBindingRepository(get_database()),
-        story_node_repository=get_story_node_repository(),
-        knowledge_service=get_knowledge_service(),
-        bible_service=get_bible_service(),
-        llm_service=get_llm_service(),
-    )
+    return _build_quality_gate_services()["validation_service"]
 
 
 @lru_cache
@@ -303,28 +353,7 @@ def get_background_task_service():
 
 def get_chapter_aftermath_pipeline():
     """章节保存后统一管线：先做 State Locks / 融合草稿 / Validation 门禁，再做叙事/向量、文风、KG 推断。"""
-    from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
-    from infrastructure.persistence.database.triple_repository import TripleRepository
-    from infrastructure.persistence.database.sqlite_storyline_repository import SqliteStorylineRepository
-    from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
-    from infrastructure.persistence.database.connection import get_database
-
-    return ChapterAftermathPipeline(
-        knowledge_service=get_knowledge_service(),
-        chapter_indexing_service=get_chapter_indexing_service(),
-        llm_service=get_llm_service(),
-        voice_drift_service=get_voice_drift_service(),
-        triple_repository=TripleRepository(),
-        foreshadowing_repository=get_foreshadowing_repository(),
-        storyline_repository=SqliteStorylineRepository(get_database()),
-        chapter_repository=get_chapter_repository(),
-        plot_arc_repository=get_plot_arc_repository(),
-        narrative_event_repository=SqliteNarrativeEventRepository(get_database()),
-        novel_repository=get_novel_repository(),
-        state_lock_service=get_state_lock_service(),
-        chapter_fusion_service=get_chapter_fusion_service(),
-        beat_sheet_service=get_beat_sheet_service(),
-    )
+    return _build_quality_gate_services()["aftermath_pipeline"]
 
 
 def get_hosted_write_service() -> HostedWriteService:
@@ -417,6 +446,7 @@ def get_consistency_checker() -> ConsistencyChecker:
     return ConsistencyChecker()
 
 
+@lru_cache
 def get_embedding_service():
     """获取 Embedding 服务（优先从数据库读取配置，环境变量作为 fallback）。
 
@@ -468,6 +498,7 @@ def get_embedding_service():
         return None
 
 
+@lru_cache
 def get_chapter_indexing_service():
     """获取章节索引服务（依赖 VectorStore + Embedding，任一不可用则返回 None）。"""
     vs = get_vector_store()

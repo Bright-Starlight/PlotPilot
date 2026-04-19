@@ -58,6 +58,7 @@ class ValidationService:
         knowledge_service: KnowledgeService,
         bible_service: BibleService,
         llm_service: "LLMService | None" = None,
+        aftermath_pipeline: Any = None,
     ):
         self.chapter_repository = chapter_repository
         self.fusion_repository = fusion_repository
@@ -68,6 +69,7 @@ class ValidationService:
         self.knowledge_service = knowledge_service
         self.bible_service = bible_service
         self.llm_service = llm_service
+        self.aftermath_pipeline = aftermath_pipeline
 
     async def start_validation(
         self,
@@ -350,11 +352,13 @@ class ValidationService:
         )
         return (len(blocking_issues) == 0, latest_report, blocking_issues)
 
-    def manual_publish_fusion_draft(self, chapter_id: str) -> dict:
-        """手动发布融合草稿到章节正文。
+    async def manual_publish_fusion_draft(self, chapter_id: str) -> dict:
+        """手动发布融合草稿到章节正文，并执行信息同步。
 
         用于 Validation 阶段 LLM 误判时，人工审阅后手动触发发布。
-        执行与自动发布相同的逻辑：获取融合草稿并替换章节正文。
+        执行与自动发布相同的逻辑：
+        1. 获取融合草稿并替换章节正文
+        2. 执行信息同步（叙事同步、向量索引、文风评分、知识图谱推断）
 
         Args:
             chapter_id: 章节 ID
@@ -383,6 +387,15 @@ class ValidationService:
         # 将融合草稿写回章节实体
         chapter.update_content(draft.text)
         self.chapter_repository.save(chapter)
+        self.chapter_draft_binding_repository.upsert_binding(
+            chapter_id=chapter_id,
+            novel_id=chapter.novel_id.value if hasattr(chapter.novel_id, "value") else str(chapter.novel_id),
+            draft_type="merged",
+            draft_id="merged-current",
+            plan_version=int(draft.plan_version),
+            state_lock_version=int(draft.state_lock_version),
+            source_fusion_id=draft.fusion_id,
+        )
 
         logger.info(
             "manual publish completed chapter_id=%s fusion_id=%s text_length=%s",
@@ -391,14 +404,56 @@ class ValidationService:
             len(draft.text),
         )
 
-        return {
+        # 构建返回结果，包含信息同步状态
+        result = {
             "chapter_id": chapter_id,
             "fusion_id": draft.fusion_id,
             "plan_version": draft.plan_version,
             "state_lock_version": draft.state_lock_version,
             "text_length": len(draft.text),
             "published": True,
+            "info_sync_completed": False,
+            "info_sync_error": None,
         }
+
+        # 执行信息同步（与自动发布后的流程一致）
+        if self.aftermath_pipeline is not None:
+            try:
+                logger.info(
+                    "manual publish triggering info sync chapter_id=%s chapter_num=%s",
+                    chapter_id,
+                    chapter.number,
+                )
+                drift_result = await self.aftermath_pipeline.run_after_chapter_saved(
+                    chapter.novel_id.value,
+                    chapter.number,
+                    draft.text,
+                    run_quality_gate=False,  # 不再执行质量门禁（已通过人工审阅）
+                    use_fusion_draft=True,   # 使用融合草稿
+                )
+                logger.info(
+                    "manual publish info sync completed chapter_id=%s similarity=%s drift_alert=%s",
+                    chapter_id,
+                    drift_result.get("similarity_score"),
+                    drift_result.get("drift_alert"),
+                )
+                result["info_sync_completed"] = True
+            except Exception as e:
+                logger.warning(
+                    "manual publish info sync failed chapter_id=%s error=%s",
+                    chapter_id,
+                    e,
+                )
+                result["info_sync_error"] = str(e)
+                # 信息同步失败不影响发布结果，仅记录警告
+        else:
+            logger.warning(
+                "manual publish skipped info sync: aftermath_pipeline not available chapter_id=%s",
+                chapter_id,
+            )
+            result["info_sync_error"] = "aftermath_pipeline not available"
+
+        return result
 
     def _load_draft_context(
         self,

@@ -238,6 +238,21 @@ def _apply_chapter_fusion_enhancements(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _apply_chapter_generation_metrics_enhancements(conn: sqlite3.Connection) -> None:
+    """为 chapter_generation_metrics 表补齐节拍质量指标列。"""
+    cur = conn.execute("PRAGMA table_info(chapter_generation_metrics)")
+    cols = {row[1] for row in cur.fetchall()}
+    if not cols:
+        return
+    if "beat_quality_json" not in cols:
+        try:
+            conn.execute("ALTER TABLE chapter_generation_metrics ADD COLUMN beat_quality_json TEXT")
+            logger.info("chapter_generation_metrics migration: added beat_quality_json")
+        except sqlite3.OperationalError as e:
+            logger.warning("chapter_generation_metrics migration skip beat_quality_json: %s", e)
+    conn.commit()
+
+
 def _apply_migration_files(conn: sqlite3.Connection) -> None:
     """应用独立的迁移文件（幂等执行）"""
     migrations_dir = Path(__file__).parent / "migrations"
@@ -353,6 +368,7 @@ class DatabaseConnection:
         _apply_character_enhancements(conn)
         _apply_chapter_summaries_enhancements(conn)
         _apply_chapter_fusion_enhancements(conn)
+        _apply_chapter_generation_metrics_enhancements(conn)
         _ensure_triple_provenance_table(conn)
         _apply_migration_files(conn)
         conn.close()

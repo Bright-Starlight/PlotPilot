@@ -18,6 +18,7 @@ class ChapterGenerationMetricsDTO:
     expansion_attempts: int
     trim_applied: bool
     fallback_used: bool
+    beat_quality: list[dict[str, Any]] | None
     min_allowed: int
     max_allowed: int
     created_at: str | None = None
@@ -39,6 +40,7 @@ class ChapterGenerationMetricsDTO:
             expansion_attempts=int(payload.get("expansion_attempts") or 0),
             trim_applied=bool(payload.get("trim_applied")),
             fallback_used=bool(payload.get("fallback_used")),
+            beat_quality=payload.get("beat_quality"),
             min_allowed=int(payload.get("min_allowed") or 0),
             max_allowed=int(payload.get("max_allowed") or 0),
             created_at=payload.get("created_at"),

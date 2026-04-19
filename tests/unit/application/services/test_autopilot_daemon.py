@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 from application.engine.dtos.word_control_dto import WordControlDTO
 from application.engine.services.autopilot_daemon import AutopilotDaemon
+from domain.ai.value_objects.prompt import Prompt
 from domain.novel.entities.novel import AutopilotStatus, Novel, NovelStage
 from domain.novel.value_objects.novel_id import NovelId
 
@@ -32,7 +33,7 @@ def _build_workflow(action: str) -> Mock:
         "style_summary": "",
         "voice_anchors": "",
     }
-    workflow.build_chapter_prompt.return_value = "prompt"
+    workflow.build_chapter_prompt.return_value = Prompt(system="system", user="user")
     workflow.post_process_generated_chapter = AsyncMock()
     workflow._apply_word_control = AsyncMock(
         return_value=(
@@ -55,8 +56,37 @@ def _build_workflow(action: str) -> Mock:
         max_allowed=3680,
     )
     workflow.word_control_service = Mock()
-    workflow.word_control_service.inject_length_requirements.side_effect = (
-        lambda prompt, target: f"{prompt}|target={target}"
+    workflow.word_control_service.inject_length_requirements.side_effect = _inject_length_requirements
+    return workflow
+
+
+def _inject_length_requirements(prompt, target):
+    if isinstance(prompt, Prompt):
+        return Prompt(system=prompt.system, user=f"{prompt.user}|target={target}")
+    return prompt
+
+
+def _build_needs_expansion_workflow() -> Mock:
+    workflow = _build_workflow("expand")
+    workflow._apply_word_control = AsyncMock(
+        return_value=(
+            "欠字正文",
+            SimpleNamespace(action="needs_expansion"),
+        )
+    )
+    workflow._serialize_word_control.return_value = WordControlDTO(
+        target=3200,
+        actual=1200,
+        tolerance=0.15,
+        delta=-2000,
+        status="needs_expansion",
+        within_tolerance=False,
+        action="needs_expansion",
+        expansion_attempts=2,
+        trim_applied=False,
+        fallback_used=True,
+        min_allowed=2720,
+        max_allowed=3680,
     )
     return workflow
 
@@ -159,6 +189,104 @@ async def test_handle_writing_stops_autopilot_when_outline_rewrite_exhausted():
     daemon._maybe_rewrite_next_chapter_outline.assert_awaited_once()
     assert novel.current_stage == NovelStage.WRITING
     assert novel.current_auto_chapters == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_writing_stops_for_manual_expansion_when_word_control_fails():
+    chapter_repository = Mock()
+    chapter_repository.get_by_novel_and_number.return_value = None
+    novel_repository = Mock()
+    metrics_repository = Mock()
+    workflow = _build_needs_expansion_workflow()
+
+    daemon = AutopilotDaemon(
+        novel_repository=novel_repository,
+        llm_service=Mock(),
+        context_builder=None,
+        background_task_service=Mock(),
+        planning_service=Mock(),
+        story_node_repo=Mock(),
+        chapter_repository=chapter_repository,
+        chapter_workflow=workflow,
+        chapter_generation_metrics_repository=metrics_repository,
+    )
+
+    daemon._is_still_running = Mock(return_value=True)
+    daemon._flush_novel = Mock()
+    daemon._find_next_unwritten_chapter_async = AsyncMock(
+        return_value=SimpleNamespace(
+            id="chapter-node-1",
+            number=1,
+            title="第一章",
+            outline="章节大纲",
+            description="",
+        )
+    )
+    daemon._get_existing_chapter_content = AsyncMock(return_value="")
+    daemon._stream_llm_with_stop_watch = AsyncMock(return_value="原始正文")
+
+    novel = _build_novel()
+
+    await daemon._handle_writing(novel)
+
+    assert novel.autopilot_status == AutopilotStatus.STOPPED
+    assert novel.current_stage == NovelStage.WRITING
+    assert novel.last_audit_issues[0]["type"] == "needs_expansion"
+    metrics_repository.upsert.assert_called_once()
+    daemon._flush_novel.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_writing_uses_per_beat_target_for_length_requirements():
+    chapter_repository = Mock()
+    chapter_repository.get_by_novel_and_number.return_value = None
+    metrics_repository = Mock()
+    workflow = _build_workflow("expand")
+    context_builder = Mock()
+    context_builder.magnify_outline_to_beats.return_value = [
+        SimpleNamespace(focus="开场", description="第一拍", target_words=180),
+    ]
+    context_builder.build_beat_prompt.return_value = "beat prompt"
+
+    daemon = AutopilotDaemon(
+        novel_repository=Mock(),
+        llm_service=Mock(),
+        context_builder=context_builder,
+        background_task_service=Mock(),
+        planning_service=Mock(),
+        story_node_repo=Mock(),
+        chapter_repository=chapter_repository,
+        chapter_workflow=workflow,
+        chapter_generation_metrics_repository=metrics_repository,
+    )
+
+    daemon._is_still_running = Mock(return_value=True)
+    daemon._flush_novel = Mock()
+    daemon._find_next_unwritten_chapter_async = AsyncMock(
+        return_value=SimpleNamespace(
+            id="chapter-node-1",
+            number=1,
+            title="第一章",
+            outline="章节大纲",
+            description="",
+        )
+    )
+    daemon._get_existing_chapter_content = AsyncMock(return_value="")
+    daemon._stream_llm_with_stop_watch = AsyncMock(
+        return_value=(
+            "他抬手推门，冷声道：“进来。”寒意顺着门缝卷进来。"
+            "他向前一步，逼得对方后退，桌角都被撞得轻响，空气一下绷紧。"
+            "屋里几个人同时收声，视线都落在那封染了雨痕的密信上。"
+        )
+    )
+    daemon._maybe_rewrite_next_chapter_outline = AsyncMock(return_value=None)
+
+    novel = _build_novel()
+
+    await daemon._handle_writing(novel)
+
+    targets = [call.kwargs["target"] for call in workflow.word_control_service.inject_length_requirements.call_args_list]
+    assert 180 in targets
 
 
 @pytest.mark.asyncio
@@ -293,6 +421,68 @@ async def test_handle_auditing_stops_when_quality_gate_retry_fails():
     assert novel.autopilot_status == AutopilotStatus.STOPPED
     assert novel.current_stage == NovelStage.AUDITING
     assert novel.last_audit_narrative_ok is False
+
+
+@pytest.mark.asyncio
+async def test_handle_auditing_skips_when_latest_fusion_is_already_published():
+    chapter = Mock(number=1, status=Mock(value="completed"), id="chapter-1", content="已发布正文")
+    chapter_repository = Mock()
+    chapter_repository.list_by_novel.return_value = [chapter]
+
+    fusion_repository = Mock()
+    fusion_repository.get_latest_draft_for_chapter.return_value = SimpleNamespace(
+        fusion_id="fd-1",
+        plan_version=3,
+        state_lock_version=5,
+    )
+    fusion_service = Mock(fusion_repository=fusion_repository)
+    aftermath_pipeline = Mock()
+    aftermath_pipeline._chapter_fusion_service = fusion_service
+    aftermath_pipeline._run_quality_gate = AsyncMock()
+    aftermath_pipeline.run_after_chapter_saved = AsyncMock()
+
+    binding_repository = Mock()
+    binding_repository.get_binding.return_value = SimpleNamespace(
+        source_fusion_id="fd-1",
+        plan_version=3,
+        state_lock_version=5,
+    )
+
+    daemon = AutopilotDaemon(
+        novel_repository=Mock(),
+        llm_service=Mock(),
+        context_builder=None,
+        background_task_service=Mock(),
+        planning_service=Mock(),
+        story_node_repo=Mock(),
+        chapter_repository=chapter_repository,
+        aftermath_pipeline=aftermath_pipeline,
+        chapter_draft_binding_repository=binding_repository,
+    )
+
+    daemon._is_still_running = Mock(return_value=True)
+    daemon._score_voice_only = AsyncMock()
+    daemon._apply_voice_rewrite_loop = AsyncMock()
+    daemon._auto_trigger_macro_diagnosis = AsyncMock()
+    daemon._maybe_generate_summaries = AsyncMock()
+
+    novel = _build_novel()
+    novel.current_stage = NovelStage.AUDITING
+
+    await daemon._handle_auditing(novel)
+
+    binding_repository.get_binding.assert_called_once_with(
+        chapter_id="chapter-1",
+        draft_type="merged",
+        draft_id="merged-current",
+    )
+    aftermath_pipeline._run_quality_gate.assert_not_awaited()
+    aftermath_pipeline.run_after_chapter_saved.assert_not_awaited()
+    daemon._auto_trigger_macro_diagnosis.assert_not_awaited()
+    daemon._maybe_generate_summaries.assert_not_awaited()
+    assert novel.current_stage == NovelStage.WRITING
+    assert novel.last_audit_chapter_number == 1
+    assert novel.last_audit_narrative_ok is True
 
 
 @pytest.mark.asyncio

@@ -38,8 +38,8 @@
 
         <n-button size="small" quaternary @click="goCastGraph">关系图</n-button>
 
-        <n-button type="primary" size="small" round :loading="saving" @click="saveContent" :disabled="!contentDirty">
-          保存
+        <n-button type="primary" size="small" round :loading="saving" @click="saveContent">
+          保存正文 / 发布
         </n-button>
       </n-space>
     </header>
@@ -105,7 +105,7 @@
                     基于合并正文（含 chapters/NNN 下分场景 parts）与大纲一句纲；「生成意见」仅填入上方表单项。
                   </n-text>
                 </n-space>
-                <n-button type="primary" block round :loading="savingReview" @click="saveReview">保存审定</n-button>
+                <n-button type="primary" block round :loading="savingReview" @click="saveReview">保存审定状态</n-button>
               </n-form>
             </n-tab-pane>
 
@@ -220,7 +220,6 @@ import { useMessage, useDialog } from 'naive-ui'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { chapterApi, type ChapterDTO } from '../api/chapter'
-import { validationReportsApi, type PublishGateDTO } from '../api/validationReports'
 import { knowledgeGraphApi, type InferenceFactBundle } from '../api/knowledgeGraph'
 import { useStatsStore } from '../stores/statsStore'
 
@@ -385,23 +384,37 @@ const onInput = () => {
 const saveContent = async () => {
   const cid = chapterId.value
   if (cid == null || saving.value) return
+
+  if (!contentDirty.value) {
+    message.info('正文没有改动')
+    return
+  }
+
   saving.value = true
   saveStatus.value = 'saving'
 
   try {
-    await chapterApi.updateChapter(slug, cid, {
+    const result = await chapterApi.updateChapter(slug, cid, {
       content: content.value
     })
+    if (currentChapterRecord.value) {
+      currentChapterRecord.value = {
+        ...currentChapterRecord.value,
+        content: content.value,
+        updated_at: new Date().toISOString(),
+      }
+    }
     saveStatus.value = 'saved'
     lastSaveTime.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     updateTime.value = new Date().toLocaleString('zh-CN', { hour12: false })
-    message.success('已保存')
-    // Refresh book stats after successful save
+    const syncSuffix = result.aftermath?.local_sync_ok ? '，本地同步完成' : ''
+    message.success(`正文已保存${syncSuffix}`)
     statsStore.onChapterSaved(slug, cid)
   } catch (error) {
     console.error('Failed to save content:', error)
     saveStatus.value = 'unsaved'
-    message.error('保存失败，请稍后重试')
+    const detail = getApiErrorMessage(error) || (error instanceof Error ? error.message : '')
+    message.error(detail || '保存失败，请稍后重试')
   } finally {
     saving.value = false
   }
@@ -426,40 +439,7 @@ const persistReview = async () => {
 }
 
 const saveReview = async () => {
-  const newStatus = statusToNew(reviewStatus.value)
-  if (newStatus !== 'approved') {
-    await persistReview()
-    return
-  }
-  if (!currentChapterRecord.value?.id) {
-    message.error('当前章节信息尚未加载完成')
-    return
-  }
-  dialog.warning({
-    title: '发布前复校',
-    content: '发布前会强制重新校验当前融合稿；如果仍有未处理的 P0 阻断问题，将禁止发布。',
-    positiveText: '继续发布',
-    negativeText: '取消',
-    onPositiveClick: async () => {
-      try {
-        const gate = await validationReportsApi.checkPublishable(currentChapterRecord.value!.id)
-        if (!gate.publishable) {
-          showPublishBlockedDialog(gate)
-          return false
-        }
-        await persistReview()
-        return true
-      } catch (error: any) {
-        const detail = error?.response?.data?.detail
-        if (detail && typeof detail === 'object') {
-          showPublishBlockedDialog(detail as PublishGateDTO)
-          return false
-        }
-        message.error(getApiErrorMessage(error) || '发布校验失败')
-        return false
-      }
-    },
-  })
+  await persistReview()
 }
 
 const runAiReview = async (save: boolean) => {
@@ -676,19 +656,6 @@ onUnmounted(() => {
   if (saveTimer.value) clearTimeout(saveTimer.value)
   if (markdownDebounceTimer.value) clearTimeout(markdownDebounceTimer.value)
 })
-
-function showPublishBlockedDialog(payload: Partial<PublishGateDTO> & { issues?: Array<{ severity?: string; title?: string; message?: string }> }) {
-  const issues = Array.isArray(payload.blocking_issues) ? payload.blocking_issues : (payload.issues ?? [])
-  const lines = issues.slice(0, 5).map(issue => `- ${issue.severity || 'P0'} ${issue.title || '未命名问题'}：${issue.message || ''}`)
-  dialog.error({
-    title: '发布已阻断',
-    content: [
-      `当前仍有 ${payload.blocking_issue_count ?? issues.length ?? 0} 个未解决的阻断问题。`,
-      lines.join('\n'),
-    ].filter(Boolean).join('\n'),
-    positiveText: '知道了',
-  })
-}
 
 function getApiErrorMessage(error: unknown): string {
   if (typeof error !== 'object' || error === null) return ''

@@ -32,11 +32,20 @@
           >
             <n-thing :title="`第${ch.number}章`">
               <template #description>
-                <div style="display: flex; flex-direction: column; gap: 4px;">
+                <div class="chapter-meta">
                   <n-text depth="3" style="font-size: 12px;">{{ ch.title }}</n-text>
-                  <n-tag size="small" :type="ch.word_count > 0 ? 'success' : 'default'" round>
-                    {{ ch.word_count > 0 ? '已收稿' : '未收稿' }}
-                  </n-tag>
+                  <div class="chapter-meta-row">
+                    <n-tag size="small" :type="ch.word_count > 0 ? 'success' : 'default'" round>
+                      {{ ch.word_count > 0 ? '已收稿' : '未收稿' }}
+                    </n-tag>
+                    <n-button
+                      size="tiny"
+                      quaternary
+                      @click.stop="openChapterEditor(ch.id)"
+                    >
+                      编辑
+                    </n-button>
+                  </div>
                 </div>
               </template>
             </n-thing>
@@ -80,6 +89,7 @@
 
 <script setup lang="ts">
 import { ref, type ComponentPublicInstance } from 'vue'
+import { useRouter } from 'vue-router'
 import StoryStructureTree from '@/components/StoryStructureTree.vue'
 import MacroPlanModal from '@/components/workbench/MacroPlanModal.vue'
 
@@ -100,6 +110,7 @@ const props = withDefaults(defineProps<ChapterListProps>(), {
   chapters: () => [],
   currentChapterId: null
 })
+const router = useRouter()
 
 const emit = defineEmits<{
   select: [id: number, title: string]
@@ -128,6 +139,10 @@ defineExpose({ refreshStoryTree })
 
 const handleChapterClick = (id: number, title = '') => {
   emit('select', id, title)
+}
+
+const openChapterEditor = (id: number) => {
+  router.push(`/book/${props.slug}/chapter/${id}`)
 }
 
 const handleBack = () => {
@@ -205,6 +220,19 @@ const handleTreeLoaded = (hasData: boolean) => {
   font-size: 13px;
   color: var(--app-muted);
   line-height: 1.5;
+}
+
+.chapter-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chapter-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .sidebar :deep(.n-list-item) {

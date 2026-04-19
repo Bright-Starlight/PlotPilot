@@ -89,6 +89,8 @@ class ManualPublishResponse(BaseModel):
     state_lock_version: int
     text_length: int
     published: bool
+    info_sync_completed: bool
+    info_sync_error: str | None
 
 
 def _summary_response(report) -> ValidationReportSummaryResponse:
@@ -287,10 +289,12 @@ async def manual_publish_fusion_draft(
     chapter_id: str,
     service: ValidationService = Depends(get_validation_service),
 ):
-    """手动发布融合草稿到章节正文。
+    """手动发布融合草稿到章节正文，并执行信息同步。
 
     用于 Validation 阶段 LLM 误判时，人工审阅后手动触发发布。
-    将最新的融合草稿内容写入章节正文，与自动发布流程相同。
+    执行与自动发布相同的逻辑：
+    1. 获取融合草稿并替换章节正文
+    2. 执行信息同步（叙事同步、向量索引、文风评分、知识图谱推断）
 
     Args:
         chapter_id: 章节 ID
@@ -302,7 +306,7 @@ async def manual_publish_fusion_draft(
         HTTPException: 400 - 章节不存在或没有融合草稿
     """
     try:
-        result = service.manual_publish_fusion_draft(chapter_id)
+        result = await service.manual_publish_fusion_draft(chapter_id)
         return ManualPublishResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
