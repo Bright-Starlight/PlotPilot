@@ -406,38 +406,80 @@ class ContextBuilder:
             return ""
         return "\n".join(lines)
 
-    def magnify_outline_to_beats(self, chapter_number: int, outline: str, target_chapter_words: int = AppConfig.DEFAULT_WORDS_PER_CHAPTER) -> List[Beat]:
-        """节拍放大器：将章节大纲拆分为微观节拍
+    def magnify_outline_to_beats(
+        self,
+        chapter_number: int,
+        outline: str,
+        target_chapter_words: int = AppConfig.DEFAULT_WORDS_PER_CHAPTER,
+        previous_chapter_seam: Optional[Dict[str, str]] = None
+    ) -> List[Beat]:
+        """Beat magnifier: split chapter outline into micro beats
 
-        核心策略：
-        1. 识别大纲中的关键动作/事件
-        2. 为每个动作分配节拍，强制增加感官细节
-        3. 控制单章推进速度，避免节奏过载
-        4. 若有 ThemeAgent，优先使用题材专项节拍模板
+        Core strategy:
+        1. Identify key actions/events in outline
+        2. Assign beats for each action, enforce sensory details
+        3. Control single-chapter pacing, avoid rhythm overload
+        4. If ThemeAgent exists, prioritize theme-specific beat templates
+        5. If previous chapter has unfinished dialogue or suspense, add transition beat
+
+        Args:
+            chapter_number: Chapter number
+            outline: Chapter outline
+            target_chapter_words: Target word count
+            previous_chapter_seam: Previous chapter seam information (optional)
         """
         beats = []
+        transition_beat = None
 
-        # ========== 题材专项开篇节拍（前 3 章） ==========
+        # Transition beat (connect to previous chapter)
+        if previous_chapter_seam:
+            unfinished_speech = previous_chapter_seam.get("unfinished_speech", "")
+            carry_over_question = previous_chapter_seam.get("carry_over_question", "")
+            ending_emotion = previous_chapter_seam.get("ending_emotion", "")
+
+            # Add transition beat if previous chapter has unfinished dialogue or suspense
+            if unfinished_speech or carry_over_question:
+                transition_parts = []
+                if unfinished_speech:
+                    transition_parts.append(f"完成未完成的话：{unfinished_speech}")
+                if carry_over_question:
+                    transition_parts.append(f"回应悬念问题：{carry_over_question}")
+
+                transition_description = "承接上一章：" + "；".join(transition_parts)
+
+                # Choose focus based on emotion
+                focus = "dialogue"
+                if ending_emotion and any(keyword in ending_emotion for keyword in ["紧张", "恐惧", "震惊", "愤怒"]):
+                    focus = "emotion"
+
+                transition_beat = Beat(
+                    description=transition_description,
+                    target_words=200,
+                    focus=focus
+                )
+                logger.info(f"Beat magnifier: added transition beat (connect to previous chapter)")
+
+        # Theme-specific opening beats (first 3 chapters)
         if self.theme_agent and chapter_number <= 3:
             try:
                 theme_opening = self.theme_agent.get_opening_beats(chapter_number)
                 if theme_opening:
                     beats = [Beat(description=desc, target_words=tw, focus=focus) for desc, tw, focus in theme_opening]
-                    logger.info(f"节拍放大器：使用题材专项开篇模板（第 {chapter_number} 章，{len(beats)} 个节拍）")
+                    logger.info(f"Beat magnifier: using theme-specific opening template (chapter {chapter_number}, {len(beats)} beats)")
             except Exception as e:
-                logger.warning(f"ThemeAgent.get_opening_beats 失败（降级默认）：{e}")
+                logger.warning(f"ThemeAgent.get_opening_beats failed (fallback to default): {e}")
 
-        # ========== 题材专项关键词节拍模板 ==========
+        # Theme-specific keyword beat templates
         if not beats and self.theme_agent:
             try:
                 theme_templates = self.theme_agent.get_beat_templates()
                 if theme_templates:
-                    # 按优先级降序排列，首个关键词命中即采用
+                    # Sort by priority descending, use first keyword match
                     sorted_templates = sorted(theme_templates, key=lambda t: t.priority, reverse=True)
                     for tmpl in sorted_templates:
                         if any(kw in outline for kw in tmpl.keywords):
                             beats = [Beat(description=desc, target_words=tw, focus=focus) for desc, tw, focus in tmpl.beats]
-                            logger.info(f"节拍放大器：使用题材专项模板（关键词命中，{len(beats)} 个节拍）")
+                            logger.info(f"Beat magnifier: using theme-specific template (keyword match, {len(beats)} beats)")
                             break
             except Exception as e:
                 logger.warning(f"ThemeAgent.get_beat_templates 失败（降级默认）：{e}")
@@ -496,14 +538,23 @@ class ContextBuilder:
                     Beat(description="场景收尾：情绪沉淀、埋下伏笔、过渡到下一章", target_words=500, focus="emotion"),
                 ]
 
-        # 调整字数分配
+        # Adjust word count allocation
         total_words = sum(b.target_words for b in beats)
-        if total_words != target_chapter_words:
+
+        # If transition beat exists, deduct its word count from total
+        if transition_beat:
+            target_chapter_words -= transition_beat.target_words
+
+        if total_words != target_chapter_words and total_words > 0:
             ratio = target_chapter_words / total_words
             for beat in beats:
                 beat.target_words = int(beat.target_words * ratio)
 
-        logger.info(f"节拍放大器：将大纲拆分为 {len(beats)} 个节拍")
+        # Insert transition beat at the beginning
+        if transition_beat:
+            beats.insert(0, transition_beat)
+
+        logger.info(f"Beat magnifier: split outline into {len(beats)} beats")
         return beats
 
     def build_beat_prompt(self, beat: Beat, beat_index: int, total_beats: int) -> str:

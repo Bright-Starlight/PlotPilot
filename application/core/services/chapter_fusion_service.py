@@ -13,6 +13,13 @@ from application.core.chapter_fusion_contract import (
     FusionGenerationPayload,
     fusion_generation_response_format,
 )
+from application.core.services.validators import (
+    ChapterCoherenceValidator,
+    CharacterReactionValidator,
+    SuspenseResolutionValidator,
+    ValidationResult,
+)
+from application.core.utils.text_extraction import CharacterExtractor, SeamExtractor
 from domain.ai.services.llm_service import GenerationConfig, LLMService
 from domain.ai.value_objects.prompt import Prompt
 from domain.novel.repositories.chapter_repository import ChapterRepository
@@ -51,6 +58,9 @@ class ChapterFusionService:
         state_lock_repository: SqliteStateLockRepository,
         llm_service: LLMService,
         validation_service: Optional["ValidationService"] = None,
+        coherence_validator: Optional[ChapterCoherenceValidator] = None,
+        reaction_validator: Optional[CharacterReactionValidator] = None,
+        suspense_validator: Optional[SuspenseResolutionValidator] = None,
     ):
         self.chapter_repository = chapter_repository
         self.beat_sheet_repository = beat_sheet_repository
@@ -58,6 +68,9 @@ class ChapterFusionService:
         self.state_lock_repository = state_lock_repository
         self.llm_service = llm_service
         self.validation_service = validation_service
+        self.coherence_validator = coherence_validator
+        self.reaction_validator = reaction_validator
+        self.suspense_validator = suspense_validator
 
     def create_job(
         self,
@@ -222,6 +235,113 @@ class ChapterFusionService:
             len(result["state_lock_violations"]),
         )
         self.fusion_repository.update_job_status(fusion_job_id, result["status"])
+
+        # LLM validator invocation
+        if any([self.coherence_validator, self.reaction_validator, self.suspense_validator]):
+            try:
+                logger.info(
+                    "fusion job llm validation start job_id=%s chapter_id=%s fusion_id=%s",
+                    fusion_job_id,
+                    job.chapter_id,
+                    draft.fusion_id,
+                )
+
+                # Get previous chapter information
+                previous_chapter_content = ""
+                previous_chapter_seam = {}
+                previous_suspense = []
+
+                if chapter.number > 1:
+                    try:
+                        previous_chapter = self.chapter_repository.get_by_number(
+                            chapter.novel_id,
+                            chapter.number - 1
+                        )
+                        if previous_chapter:
+                            previous_chapter_content = previous_chapter.content or ""
+
+                            # Get open_questions from previous chapter's fusion draft as suspense
+                            previous_job = self.fusion_repository.get_latest_job_for_chapter(previous_chapter.id.value)
+                            if previous_job and previous_job.status in ["completed", "warning"]:
+                                previous_draft = self.fusion_repository.get_draft_by_job(previous_job.fusion_job_id)
+                                if previous_draft:
+                                    previous_suspense = previous_draft.open_questions or []
+
+                            # Extract seam information from previous chapter
+                            previous_chapter_seam = SeamExtractor.extract_seam_from_content(previous_chapter_content)
+                    except Exception as e:
+                        logger.warning(f"获取上一章信息失败: {e}")
+
+                # Extract key events from beat_drafts
+                key_events = [beat.event for beat in beat_drafts if beat.event]
+
+                # Extract key characters from chapter outline
+                key_characters = CharacterExtractor.extract_characters_from_outline(chapter.outline or "")
+
+                # Call validators
+                validation_results = await self._validate_fusion_draft(
+                    fusion_result=result,
+                    previous_chapter_content=previous_chapter_content,
+                    previous_chapter_seam=previous_chapter_seam,
+                    key_characters=key_characters,
+                    key_events=key_events,
+                    previous_suspense=previous_suspense,
+                )
+
+                # Count validation results
+                total_issues = sum(len(r.issues) for r in validation_results.values())
+                critical_issues = sum(
+                    len([i for i in r.issues if i.severity == "critical"])
+                    for r in validation_results.values()
+                )
+
+                # Check for critical issues
+                has_critical = self._has_critical_issues(validation_results)
+
+                logger.info(
+                    "fusion job llm validation completed job_id=%s chapter_id=%s validator_count=%s total_issues=%s critical_issues=%s has_critical=%s",
+                    fusion_job_id,
+                    job.chapter_id,
+                    len(validation_results),
+                    total_issues,
+                    critical_issues,
+                    has_critical,
+                )
+
+                # Log critical issues if found
+                if has_critical:
+                    self.fusion_repository.add_log(
+                        fusion_job_id,
+                        job.chapter_id,
+                        "llm_validation",
+                        "warning",
+                        f"发现 {critical_issues} 个严重问题",
+                    )
+                    logger.warning(
+                        "fusion job llm validation found critical issues job_id=%s chapter_id=%s critical_count=%s",
+                        fusion_job_id,
+                        job.chapter_id,
+                        critical_issues,
+                    )
+                else:
+                    self.fusion_repository.add_log(
+                        fusion_job_id,
+                        job.chapter_id,
+                        "llm_validation",
+                        "completed",
+                        f"验证通过，发现 {total_issues} 个问题",
+                    )
+
+            except Exception as e:
+                logger.error(f"fusion job llm validation error job_id={fusion_job_id} error={e}")
+                self.fusion_repository.add_log(
+                    fusion_job_id,
+                    job.chapter_id,
+                    "llm_validation",
+                    "failed",
+                    str(e),
+                )
+
         if self.validation_service is not None:
             try:
                 logger.info(
@@ -356,6 +476,7 @@ class ChapterFusionService:
         target_words: int,
         suspense_budget: Dict[str, Any],
         state_locks: Optional[Dict[str, Any]] = None,
+        previous_chapter_seam: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         logger.info(
             "fusion compose start beat_count=%s target_words=%s suspense_primary=%s suspense_secondary=%s state_lock_group_count=%s",
@@ -405,6 +526,7 @@ class ChapterFusionService:
             suspense_budget=suspense_budget,
             target_words=target_words,
             state_locks=state_locks or {},
+            previous_chapter_seam=previous_chapter_seam,
         )
         payload = await structured_json_generate(
             llm=self.llm_service,
@@ -516,7 +638,9 @@ class ChapterFusionService:
             len(warnings),
             len(state_lock_violations),
         )
-        return {
+
+        # 构建返回结果
+        result = {
             "status": "warning" if warnings else "completed",
             "text": text,
             "repeat_ratio": round(repeat_ratio, 2),
@@ -526,6 +650,8 @@ class ChapterFusionService:
             "warnings": warnings,
             "state_lock_violations": state_lock_violations,
         }
+
+        return result
 
     def _build_fusion_prompt(
         self,
@@ -538,6 +664,7 @@ class ChapterFusionService:
         suspense_budget: Dict[str, Any],
         target_words: int,
         state_locks: Dict[str, Any],
+        previous_chapter_seam: Optional[Dict[str, str]] = None,
     ) -> Prompt:
         beat_lines = []
         for index, beat in enumerate(beat_drafts, start=1):
@@ -559,12 +686,26 @@ class ChapterFusionService:
             "必须覆盖全部关键事实，保持人物关系与终态约束，不要编造输入里没有的新设定。"
             "只输出符合 JSON schema 的对象。"
         )
+        seam_constraint = ""
+        if previous_chapter_seam:
+            seam_parts = []
+            if previous_chapter_seam.get("ending_state"):
+                seam_parts.append(f"上一章结尾状态：{previous_chapter_seam['ending_state']}")
+            if previous_chapter_seam.get("unfinished_speech"):
+                seam_parts.append(f"上一章未完成的话：{previous_chapter_seam['unfinished_speech']}")
+            if previous_chapter_seam.get("carry_over_question"):
+                seam_parts.append(f"必须回应的问题：{previous_chapter_seam['carry_over_question']}")
+            if previous_chapter_seam.get("ending_emotion"):
+                seam_parts.append(f"上一章结尾情绪：{previous_chapter_seam['ending_emotion']}")
+            if seam_parts:
+                seam_constraint = "【承接约束】\n" + "\n".join(seam_parts) + "\n要求：本章开头必须直接承接以上内容，不得跳到新场景或新时间。\n\n"
         user_prompt = (
             "任务代号:fusion_generation_v1\n\n"
             f"章节标题:{chapter_title or '未命名章节'}\n"
             f"目标字数:{target_words}\n"
             f"悬念预算:主悬念 {int(suspense_budget.get('primary') or 0)},支悬念 {int(suspense_budget.get('secondary') or 0)}\n"
             f"预期终态:{expected_end_state or {}}\n\n"
+            f"{seam_constraint}"
             f"章节大纲:\n{chapter_outline or '无'}\n\n"
             f"现有正文(可吸收但不要原样拼贴):\n{chapter_content or '无'}\n\n"
             f"节拍草稿:\n{'\n\n'.join(beat_lines)}\n\n"
@@ -675,3 +816,77 @@ class ChapterFusionService:
         self.fusion_repository.add_log(fusion_job_id, chapter_id, step_name, "failed", message)
         self.fusion_repository.update_job_status(fusion_job_id, "failed", message)
         return self.fusion_repository.get_job(fusion_job_id)
+
+    async def _validate_fusion_draft(
+        self,
+        fusion_result: Dict[str, Any],
+        previous_chapter_content: str,
+        previous_chapter_seam: Dict[str, str],
+        key_characters: List[str],
+        key_events: List[str],
+        previous_suspense: List[str],
+    ) -> Dict[str, ValidationResult]:
+        """验证融合草稿"""
+
+        results = {}
+
+        # 1. 连贯性验证
+        if self.coherence_validator and previous_chapter_content:
+            try:
+                results["coherence"] = await self.coherence_validator.validate(
+                    previous_chapter_content=previous_chapter_content,
+                    current_chapter_content=fusion_result["text"],
+                    previous_chapter_seam=previous_chapter_seam,
+                )
+                logger.info(
+                    "fusion validation coherence completed is_valid=%s issue_count=%s",
+                    results["coherence"].is_valid,
+                    len(results["coherence"].issues),
+                )
+            except Exception as e:
+                logger.error(f"融合草稿连贯性验证失败: {e}")
+
+        # 2. 人物反应验证
+        if self.reaction_validator and key_characters and key_events:
+            try:
+                results["reaction"] = await self.reaction_validator.validate(
+                    chapter_content=fusion_result["text"],
+                    key_characters=key_characters,
+                    key_events=key_events,
+                )
+                logger.info(
+                    "fusion validation reaction completed is_valid=%s issue_count=%s",
+                    results["reaction"].is_valid,
+                    len(results["reaction"].issues),
+                )
+            except Exception as e:
+                logger.error(f"融合草稿人物反应验证失败: {e}")
+
+        # 3. 悬念解答验证
+        if self.suspense_validator and previous_suspense:
+            try:
+                results["suspense"] = await self.suspense_validator.validate(
+                    previous_suspense=previous_suspense,
+                    current_chapter_content=fusion_result["text"],
+                )
+                logger.info(
+                    "fusion validation suspense completed is_valid=%s issue_count=%s",
+                    results["suspense"].is_valid,
+                    len(results["suspense"].issues),
+                )
+            except Exception as e:
+                logger.error(f"融合草稿悬念解答验证失败: {e}")
+
+        return results
+
+    def _has_critical_issues(self, validation_results: Dict[str, ValidationResult]) -> bool:
+        """Check if there are critical issues"""
+        for result in validation_results.values():
+            critical_issues = [
+                issue for issue in result.issues
+                if issue.severity == "critical"
+            ]
+            if critical_issues:
+                return True
+        return False
+

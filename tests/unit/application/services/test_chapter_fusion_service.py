@@ -204,6 +204,130 @@ class TestChapterFusionService:
         assert "悬念预算" in " ".join(result["open_questions"])
 
     @pytest.mark.asyncio
+    async def test_compose_fusion_accepts_paraphrased_facts_used_when_text_covers_fact(self, service):
+        service.llm_service = _FakeLLMService(
+            {
+                "text": (
+                    "顾玄音翻开命簿，指着那张与沈墨白一模一样的侧影，低声道出土木堡女医官的旧名。"
+                    "她没有把话说透，只说那是他前世残留的一部分。"
+                ),
+                "facts_used": ["顾玄音通过命簿向沈墨白揭示其土木堡女医官的前世身份"],
+                "end_state": {},
+                "suspense_used": 1,
+                "open_questions": [],
+                "model_warnings": [],
+            }
+        )
+
+        result = await service._compose_fusion(
+            "第二十八章",
+            "",
+            "",
+            [
+                BeatDraft(
+                    "b1",
+                    "命簿中的前世面容",
+                    "揭示前世身份",
+                    "命簿中的前世面容:顾玄音通过命簿向沈墨白揭示其土木堡女医官的前世身份，建立悬念",
+                    location="废墟",
+                )
+            ],
+            target_words=300,
+            suspense_budget={"primary": 1, "secondary": 0},
+        )
+
+        assert result["facts_confirmed"] == [
+            "命簿中的前世面容:顾玄音通过命簿向沈墨白揭示其土木堡女医官的前世身份，建立悬念"
+        ]
+        assert all("关键事实" not in warning for warning in result["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_compose_fusion_uses_text_fallback_when_facts_used_is_empty(self, service):
+        service.llm_service = _FakeLLMService(
+            {
+                "text": (
+                    "沈墨白胸口烙印猛地一跳，三百年前的雪原风沙陡然灌入脑海。"
+                    "他看见前世女医官拖着伤者逆风奔行，雪粒打在脸上像刀子。"
+                ),
+                "facts_used": [],
+                "end_state": {},
+                "suspense_used": 1,
+                "open_questions": [],
+                "model_warnings": [],
+            }
+        )
+
+        result = await service._compose_fusion(
+            "第二十八章",
+            "",
+            "",
+            [
+                BeatDraft(
+                    "b1",
+                    "三百年前的雪原记忆",
+                    "前世记忆复苏",
+                    "三百年前的雪原记忆:沈墨白体内烙印跳动，记忆碎片涌入，看到前世女医官在风沙中救人的画面",
+                    location="雪原",
+                )
+            ],
+            target_words=300,
+            suspense_budget={"primary": 1, "secondary": 0},
+        )
+
+        assert result["facts_confirmed"] == [
+            "三百年前的雪原记忆:沈墨白体内烙印跳动，记忆碎片涌入，看到前世女医官在风沙中救人的画面"
+        ]
+        assert all("关键事实" not in warning for warning in result["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_compose_fusion_warns_when_fact_missing_from_facts_used_and_text(self, service):
+        service.llm_service = _FakeLLMService(
+            {
+                "text": "众人只在废墟外围短暂停留，没有更多异变。",
+                "facts_used": [],
+                "end_state": {},
+                "suspense_used": 0,
+                "open_questions": [],
+                "model_warnings": [],
+            }
+        )
+
+        result = await service._compose_fusion(
+            "第二十八章",
+            "",
+            "",
+            [
+                BeatDraft(
+                    "b1",
+                    "苍白之手的恐怖现身",
+                    "裂缝现身",
+                    "苍白之手的恐怖现身:天道裂痕中涌出暗红雾气，一只与沈墨白面容相同的苍白之手从裂缝中探出抓住他",
+                    location="废墟",
+                )
+            ],
+            target_words=300,
+            suspense_budget={"primary": 0, "secondary": 0},
+        )
+
+        assert result["facts_confirmed"] == []
+        assert any("融合稿缺失 1 条关键事实" in warning for warning in result["warnings"])
+
+    def test_build_fusion_prompt_requires_verbatim_facts_used(self, service):
+        prompt = service._build_fusion_prompt(
+            chapter_title="第二十八章",
+            chapter_content="",
+            chapter_outline="",
+            beat_drafts=[BeatDraft("b1", "命簿中的前世面容", "揭示前世身份", "命簿中的前世面容:顾玄音通过命簿向沈墨白揭示其土木堡女医官的前世身份，建立悬念")],
+            required_facts=["命簿中的前世面容:顾玄音通过命簿向沈墨白揭示其土木堡女医官的前世身份，建立悬念"],
+            expected_end_state={},
+            suspense_budget={"primary": 1, "secondary": 0},
+            target_words=1200,
+            state_locks={},
+        )
+
+        assert "facts_used 只能从“必保留事实”中逐条原样复制已覆盖的事实" in prompt.user
+
+    @pytest.mark.asyncio
     async def test_load_beat_drafts_rejects_length_mismatch(self, chapter):
         fusion_repo = Mock()
         service = ChapterFusionService(
