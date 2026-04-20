@@ -719,6 +719,7 @@ def get_beat_sheet_service():
         BeatSheetService 实例
     """
     from application.blueprint.services.beat_sheet_service import BeatSheetService
+    from application.engine.theme.theme_registry import ThemeAgentRegistry
 
     llm_service = get_llm_service()
     if llm_runtime_is_mock(llm_service):
@@ -726,13 +727,20 @@ def get_beat_sheet_service():
     else:
         logger.info(f"Using {llm_service.__class__.__name__} for beat sheet generation")
 
+    # Initialize theme registry with auto_discover
+    theme_registry = ThemeAgentRegistry()
+    theme_registry.auto_discover()
+
     return BeatSheetService(
         beat_sheet_repo=get_beat_sheet_repository(),
         chapter_repo=get_chapter_repository(),
         storyline_repo=get_storyline_repository(),
         llm_service=llm_service,
         vector_store=get_vector_store(),
-        bible_service=get_bible_service()
+        bible_service=get_bible_service(),
+        novel_repo=get_novel_repository(),
+        story_node_repo=get_story_node_repository(),
+        theme_registry=theme_registry,
     )
 
 
@@ -1023,14 +1031,22 @@ def get_knowledge_graph_service():
 def get_continuous_planning_service():
     """获取 AI 连续规划服务（ContinuousPlanningService）"""
     from application.blueprint.services.continuous_planning_service import ContinuousPlanningService
+    from application.engine.theme.theme_registry import ThemeAgentRegistry
     from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
     from application.paths import get_db_path
     db_path = get_db_path()
+
+    # Initialize theme registry with auto_discover
+    theme_registry = ThemeAgentRegistry()
+    theme_registry.auto_discover()
+
     return ContinuousPlanningService(
         story_node_repo=get_story_node_repository(),
         chapter_element_repo=ChapterElementRepository(db_path),
         llm_service=get_llm_service(),
         bible_service=get_bible_service(),
         chapter_repository=get_chapter_repository(),
+        novel_repository=get_novel_repository(),
+        theme_registry=theme_registry,
     )
 

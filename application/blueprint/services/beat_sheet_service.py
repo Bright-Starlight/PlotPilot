@@ -14,11 +14,13 @@ from domain.novel.value_objects.scene import Scene
 from domain.novel.repositories.beat_sheet_repository import BeatSheetRepository
 from domain.novel.repositories.chapter_repository import ChapterRepository
 from domain.novel.repositories.storyline_repository import StorylineRepository
+from domain.structure.story_node import NodeType
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
 
 if TYPE_CHECKING:
     from infrastructure.ai.chromadb_vector_store import ChromaDBVectorStore
+    from application.engine.theme.theme_registry import ThemeAgentRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,8 @@ class BeatSheetService:
         vector_store: "ChromaDBVectorStore",
         bible_service=None,
         novel_repo=None,
+        story_node_repo=None,
+        theme_registry: "ThemeAgentRegistry" = None,
     ):
         self.beat_sheet_repo = beat_sheet_repo
         self.chapter_repo = chapter_repo
@@ -48,6 +52,8 @@ class BeatSheetService:
         self.vector_store = vector_store
         self.bible_service = bible_service
         self.novel_repo = novel_repo
+        self.story_node_repo = story_node_repo
+        self.theme_registry = theme_registry
 
     async def generate_beat_sheet(
         self,
@@ -85,12 +91,13 @@ class BeatSheetService:
         if not chapter:
             raise ValueError(f"Chapter {chapter_id} not found")
 
+        # Get novel for genre and target_words_per_chapter
+        novel = None
+        if self.novel_repo:
+            novel = self.novel_repo.get_by_id(chapter.novel_id)
+
         if target_words_per_chapter is None:
-            if self.novel_repo:
-                novel = self.novel_repo.get_by_id(chapter.novel_id)
-                target_words_per_chapter = novel.target_words_per_chapter if novel else AppConfig.DEFAULT_WORDS_PER_CHAPTER
-            else:
-                target_words_per_chapter = AppConfig.DEFAULT_WORDS_PER_CHAPTER
+            target_words_per_chapter = novel.target_words_per_chapter if novel else AppConfig.DEFAULT_WORDS_PER_CHAPTER
 
         if target_beat_count is None:
             target_beat_count = BeatCalculator.calculate_beat_count(target_words_per_chapter)
@@ -106,26 +113,44 @@ class BeatSheetService:
             f"Words per beat: {words_per_beat}"
         )
 
-        # 1. 混合检索：获取相关上下文
+        # 1. Get macro context (Act/Volume/Part ancestors)
+        macro_context = {}
+        if self.story_node_repo:
+            macro_context = await self._get_macro_context(chapter_id)
+
+        # 2. Get theme agent for genre-aware beats
+        theme_agent = None
+        beat_type_labels = []
+        if novel and self.theme_registry:
+            theme_agent = self._get_theme_agent(novel)
+            if theme_agent:
+                matched_template = self._match_beat_template(theme_agent, outline)
+                if matched_template:
+                    logger.info(f"Using genre-specific beat template: {matched_template.keywords}")
+                    beat_type_labels = [b[2] if len(b) > 2 else "general" for b in matched_template.beats]
+
+        # 3. 混合检索：获取相关上下文
         context = await self._retrieve_relevant_context(chapter_id, outline)
 
-        # 2. 构建提示词
+        # 4. 构建提示词
         prompt = self._build_beat_sheet_prompt(
             outline,
             context,
             target_words_per_chapter,
             target_beat_count=target_beat_count,
-            words_per_beat=words_per_beat
+            words_per_beat=words_per_beat,
+            macro_context=macro_context,
+            beat_type_labels=beat_type_labels,
         )
 
-        # 3. 调用 LLM 生成节拍表
+        # 5. 调用 LLM 生成节拍表
         config = GenerationConfig(max_tokens=2048, temperature=0.7)
         response = await self.llm_service.generate(prompt, config)
 
-        # 4. 解析响应
-        scenes = self._parse_llm_response(response)
+        # 6. 解析响应
+        scenes = self._parse_llm_response(response, beat_type_labels=beat_type_labels)
 
-        # 5. 创建节拍表实体
+        # 7. 创建节拍表实体
         beat_sheet = BeatSheet(
             id=str(uuid.uuid4()),
             chapter_id=chapter_id,
@@ -134,7 +159,7 @@ class BeatSheetService:
             state_lock_version=effective_state_lock_version,
         )
 
-        # 6. 保存到仓储
+        # 8. 保存到仓储
         await self.beat_sheet_repo.save(beat_sheet)
 
         logger.info(f"Beat sheet generated with {len(scenes)} scenes")
@@ -380,13 +405,160 @@ class BeatSheetService:
 
         return context
 
+    async def _get_macro_context(self, chapter_id: str) -> Dict:
+        """获取章节的宏观上下文（Act/Volume/Part 完整规划信息）
+
+        通过 StoryNodeRepository 追溯 chapter → act → volume → part 的祖先链，
+        取出各层的 description、key_events、narrative_arc、conflicts、themes 等信息。
+
+        Args:
+            chapter_id: 章节 ID
+
+        Returns:
+            包含 part/volume/act 完整规划信息的字典
+        """
+        if not self.story_node_repo:
+            return {}
+
+        from domain.novel.value_objects.chapter_id import ChapterId
+
+        try:
+            # Find the story node for this chapter
+            chapter = self.chapter_repo.get_by_id(ChapterId(chapter_id))
+            if not chapter:
+                return {}
+
+            # Find the corresponding story node by chapter number
+            all_nodes = await self.story_node_repo.get_by_novel(chapter.novel_id)
+            chapter_node = None
+            for node in all_nodes:
+                if node.node_type == NodeType.CHAPTER and node.number == chapter.number:
+                    chapter_node = node
+                    break
+
+            if not chapter_node:
+                return {}
+
+            # Traverse upward: chapter → act → volume → part
+            macro_context = {}
+            current = chapter_node
+            parent_id = current.parent_id
+
+            # Get act - include description, key_events, narrative_arc, conflicts, themes
+            if parent_id:
+                act_node = await self.story_node_repo.get_by_id(parent_id)
+                if act_node and act_node.node_type == NodeType.ACT:
+                    act_parts = []
+                    if act_node.description:
+                        act_parts.append(act_node.description)
+                    if act_node.narrative_arc:
+                        act_parts.append(f"叙事弧线：{act_node.narrative_arc}")
+                    if act_node.key_events:
+                        act_parts.append(f"关键事件：{'；'.join(act_node.key_events)}")
+                    if act_node.conflicts:
+                        act_parts.append(f"核心冲突：{'；'.join(act_node.conflicts)}")
+                    if act_node.themes:
+                        act_parts.append(f"主题：{'、'.join(act_node.themes)}")
+                    if act_parts:
+                        macro_context["act"] = "\n".join(act_parts)
+                    parent_id = act_node.parent_id
+
+                    # Get volume - include description and themes
+                    if parent_id:
+                        volume_node = await self.story_node_repo.get_by_id(parent_id)
+                        if volume_node and volume_node.node_type == NodeType.VOLUME:
+                            volume_parts = []
+                            if volume_node.description:
+                                volume_parts.append(volume_node.description)
+                            if volume_node.themes:
+                                volume_parts.append(f"主题：{'、'.join(volume_node.themes)}")
+                            if volume_parts:
+                                macro_context["volume"] = "\n".join(volume_parts)
+                            parent_id = volume_node.parent_id
+
+                            # Get part - include description and themes
+                            if parent_id:
+                                part_node = await self.story_node_repo.get_by_id(parent_id)
+                                if part_node and part_node.node_type == NodeType.PART:
+                                    part_parts = []
+                                    if part_node.description:
+                                        part_parts.append(part_node.description)
+                                    if part_node.themes:
+                                        part_parts.append(f"主题：{'、'.join(part_node.themes)}")
+                                    if part_parts:
+                                        macro_context["part"] = "\n".join(part_parts)
+
+            logger.info(f"Retrieved macro context: {list(macro_context.keys())}")
+            return macro_context
+
+        except Exception as e:
+            logger.warning(f"Failed to retrieve macro context: {e}")
+            return {}
+
+    def _get_theme_agent(self, novel) -> Optional["ThemeAgent"]:
+        """根据小说题材获取对应的 ThemeAgent
+
+        Args:
+            novel: Novel 实体
+
+        Returns:
+            ThemeAgent 实例，如果未找到则返回 None
+        """
+        if not novel or not self.theme_registry:
+            return None
+
+        genre = getattr(novel, 'genre', None) or ""
+        if not genre:
+            return None
+
+        agent = self.theme_registry.get_or_default(genre)
+        if agent:
+            logger.info(f"Using theme agent: {agent.genre_key} ({agent.genre_name})")
+        return agent
+
+    def _match_beat_template(self, theme_agent, outline: str) -> Optional["BeatTemplate"]:
+        """根据大纲关键词匹配题材的节拍模板
+
+        Args:
+            theme_agent: ThemeAgent 实例
+            outline: 章节大纲
+
+        Returns:
+            匹配的 BeatTemplate，如果无匹配则返回 None
+        """
+        if not theme_agent:
+            return None
+
+        try:
+            templates = theme_agent.get_beat_templates()
+            if not templates:
+                return None
+
+            # Sort by priority descending
+            sorted_templates = sorted(templates, key=lambda t: t.priority, reverse=True)
+
+            # Find first matching template
+            outline_lower = outline.lower()
+            for template in sorted_templates:
+                for keyword in template.keywords:
+                    if keyword.lower() in outline_lower:
+                        logger.info(f"Matched beat template: keywords={template.keywords}, priority={template.priority}")
+                        return template
+
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to match beat template: {e}")
+            return None
+
     def _build_beat_sheet_prompt(
         self,
         outline: str,
         context: Dict,
         target_words_per_chapter: int = 3500,
         target_beat_count: int = 4,
-        words_per_beat: List[int] = None
+        words_per_beat: List[int] = None,
+        macro_context: Dict = None,
+        beat_type_labels: List[str] = None,
     ) -> Prompt:
         """构建节拍表生成提示词（使用动态节拍数和字数分配）
 
@@ -396,6 +568,8 @@ class BeatSheetService:
             target_words_per_chapter: 目标章节字数
             target_beat_count: 目标节拍数量
             words_per_beat: 每个节拍的目标字数列表
+            macro_context: 宏观上下文（Act/Volume/Part description）
+            beat_type_labels: 题材节拍类型标签列表
         """
 
         if words_per_beat is None or len(words_per_beat) != target_beat_count:
@@ -403,9 +577,24 @@ class BeatSheetService:
             avg_words = target_words_per_chapter // target_beat_count
             words_per_beat = [avg_words] * target_beat_count
 
+        if macro_context is None:
+            macro_context = {}
+        if beat_type_labels is None:
+            beat_type_labels = []
+
         # 计算总字数范围
         total_words_min = int(target_words_per_chapter * 0.8)  # 80%
         total_words_max = int(target_words_per_chapter * 1.2)  # 120%
+
+        # 构建 beat type guidance
+        beat_type_guidance = ""
+        if beat_type_labels:
+            beat_type_lines = []
+            for i, label in enumerate(beat_type_labels):
+                if label and label != "general":
+                    beat_type_lines.append(f"- 场景 {i+1}: {label}")
+            if beat_type_lines:
+                beat_type_guidance = "\n题材节拍类型：" + "\n".join(beat_type_lines)
 
         system_prompt = f"""你是一位专业的小说编剧，擅长将章节大纲拆解为具体的场景（Scene）。
 
@@ -417,6 +606,7 @@ class BeatSheetService:
 3. 指定地点（可选）
 4. 指定情绪基调（例如：紧张、温馨、悲伤、激烈）
 5. 预估字数（根据下面的分配）
+6. 指定节拍类型（可选，用于标识场景功能类型）{beat_type_guidance}
 
 场景字数分配：
 {chr(10).join(f"- 场景 {i+1}: {words} 字" for i, words in enumerate(words_per_beat))}
@@ -430,6 +620,7 @@ class BeatSheetService:
       "pov_character": "POV 角色名称",
       "location": "地点（可选）",
       "tone": "情绪基调",
+      "beat_type": "节拍类型（可选，如 cultivation, court_debate, general）",
       "estimated_words": {words_per_beat[0]}
     }}
   ]
@@ -455,6 +646,15 @@ class BeatSheetService:
 {outline}
 
 """
+
+        # 添加宏观上下文（Part/Volume/Act description）
+        if macro_context:
+            if macro_context.get("part"):
+                user_prompt += f"\n=== Part 宏观设定 ===\n{macro_context['part']}\n"
+            if macro_context.get("volume"):
+                user_prompt += f"\n=== Volume 宏观设定 ===\n{macro_context['volume']}\n"
+            if macro_context.get("act"):
+                user_prompt += f"\n=== Act 宏观设定 ===\n{macro_context['act']}\n"
 
         # 添加主要人物信息
         if context.get("characters"):
@@ -499,8 +699,11 @@ class BeatSheetService:
             user=user_prompt
         )
 
-    def _parse_llm_response(self, response) -> List[Scene]:
+    def _parse_llm_response(self, response, beat_type_labels: List[str] = None) -> List[Scene]:
         """解析 LLM 响应，提取场景列表"""
+        if beat_type_labels is None:
+            beat_type_labels = []
+
         try:
             # 提取响应文本（处理 GenerationResult 对象）
             if hasattr(response, 'content'):
@@ -525,6 +728,13 @@ class BeatSheetService:
 
             scenes = []
             for i, scene_data in enumerate(scenes_data):
+                # Use beat_type from response if available, otherwise fallback to template label
+                beat_type = scene_data.get("beat_type", "")
+                if not beat_type and i < len(beat_type_labels):
+                    beat_type = beat_type_labels[i]
+                if not beat_type:
+                    beat_type = "general"
+
                 scene = Scene(
                     title=scene_data.get("title", f"场景 {i+1}"),
                     goal=scene_data.get("goal", ""),
@@ -532,7 +742,8 @@ class BeatSheetService:
                     location=scene_data.get("location"),
                     tone=scene_data.get("tone"),
                     estimated_words=scene_data.get("estimated_words", 800),
-                    order_index=i
+                    order_index=i,
+                    beat_type=beat_type,
                 )
                 scenes.append(scene)
 

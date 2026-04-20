@@ -20,6 +20,7 @@ class Scene:
     tone: Optional[str]  # 情绪基调（例如：紧张、温馨、悲伤）
     estimated_words: int  # 预估字数
     order_index: int  # 场景顺序（从 0 开始）
+    beat_type: str = "general"  # 节拍类型（来自题材模板，如 cultivation, court_debate 等）
 
     def __post_init__(self):
         """验证场景数据"""

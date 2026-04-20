@@ -208,6 +208,7 @@ class ContinuousPlanningService:
         knowledge_service=None,
         novel_repository=None,
         foreshadowing_repository=None,
+        theme_registry=None,
     ):
         self.story_node_repo = story_node_repo
         self.chapter_element_repo = chapter_element_repo
@@ -217,6 +218,45 @@ class ContinuousPlanningService:
         self.knowledge_service = knowledge_service
         self.novel_repository = novel_repository
         self.foreshadowing_repository = foreshadowing_repository
+        self.theme_registry = theme_registry
+
+    def _build_theme_context_prompt(self, novel_id: str, chapter_number: int, outline: str) -> str:
+        """构建题材上下文提示词
+
+        从 ThemeAgent 获取 world_rules、atmosphere、taboos、tropes 等内容，
+        格式化为可注入 prompt 的文本。
+
+        Args:
+            novel_id: 小说 ID
+            chapter_number: 章节号
+            outline: 章节大纲
+
+        Returns:
+            格式化后的题材上下文文本，空字符串 if 无 agent
+        """
+        if not self.theme_registry or not self.novel_repository:
+            return ""
+
+        try:
+            # Get novel to find genre
+            novel = self.novel_repository.get_by_id(novel_id)
+            if not novel:
+                return ""
+
+            genre = getattr(novel, 'genre', None) or ""
+            if not genre:
+                return ""
+
+            agent = self.theme_registry.get_or_default(genre)
+            if not agent:
+                return ""
+
+            directives = agent.get_context_directives(novel_id, chapter_number, outline)
+            return directives.to_context_text()
+
+        except Exception as e:
+            logger.warning(f"Failed to build theme context prompt: {e}")
+            return ""
 
     # ==================== 宏观规划 ====================
 
@@ -908,7 +948,7 @@ class ContinuousPlanningService:
 
         prompt = self._build_act_planning_prompt(
             act_node, bible_context, previous_summary, chapter_count,
-            genre=genre, sub_genres=sub_genres
+            genre=genre, sub_genres=sub_genres, novel_id=act_node.novel_id
         )
 
         try:
@@ -2460,6 +2500,7 @@ class ContinuousPlanningService:
         chapter_count: int,
         genre: str = "",
         sub_genres: Optional[List[str]] = None,
+        novel_id: str = None,
     ) -> Prompt:
         """构建幕级规划提示词
 
@@ -2470,6 +2511,7 @@ class ContinuousPlanningService:
             chapter_count: 章节数量
             genre: 题材类型（如：history, xuanhuan, hybrid）
             sub_genres: 子题材列表
+            novel_id: 小说 ID（用于获取题材上下文）
         """
         template_id, sub_genres_ctx = self._select_planning_template(genre, sub_genres or [])
 
@@ -2543,7 +2585,15 @@ class ContinuousPlanningService:
         sub_genres_focus = sub_genres_ctx.get("sub_genres_focus", "")
         focus_note = f"\n【子类型侧重】{sub_genres_focus}" if sub_genres_focus else ""
 
-        user_msg = f"""{context}{focus_note}
+        # 获取题材上下文（world_rules, atmosphere, taboos, tropes）
+        theme_context = ""
+        if novel_id and self.theme_registry:
+            # For act planning, we use chapter_number=1 as a placeholder since we're planning multiple chapters
+            theme_context = self._build_theme_context_prompt(novel_id, 1, "")
+            if theme_context:
+                theme_context = f"\n【题材上下文】\n{theme_context}"
+
+        user_msg = f"""{context}{focus_note}{theme_context}
 
 请为这一幕规划 {chapter_count} 个章节。如果没有详细的世界观信息，请生成通用的章节框架。
 
