@@ -192,10 +192,12 @@ async def confirm_act_chapters(
 
     用户编辑后，创建章节节点和元素关联
     """
+    from application.blueprint.services.continuous_planning_service import PlanningMode
     try:
         result = await service.confirm_act_planning(
             act_id=act_id,
-            chapters=request.chapters
+            chapters=request.chapters,
+            mode=PlanningMode.OVERWRITE
         )
         return result
     except ValueError as e:

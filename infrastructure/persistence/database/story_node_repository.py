@@ -309,20 +309,35 @@ class StoryNodeRepository:
                 placeholders = ",".join(["?"] * len(deletes))
                 cursor.execute(f"DELETE FROM story_nodes WHERE id IN ({placeholders})", deletes)
 
-            # 2. 批量更新（只更新 title, description, order_index）
+            # 2. 批量更新（只更新 title, description, order_index, suggested_chapter_count）
             if updates:
                 for u in updates:
-                    cursor.execute("""
-                        UPDATE story_nodes
-                        SET title=?, description=?, order_index=?, updated_at=?
-                        WHERE id=?
-                    """, (
-                        u['title'],
-                        u.get('description', ''),
-                        u['order_index'],
-                        datetime.now().isoformat(),
-                        u['id']
-                    ))
+                    # 构建更新语句，如果有 suggested_chapter_count 则更新
+                    if 'suggested_chapter_count' in u:
+                        cursor.execute("""
+                            UPDATE story_nodes
+                            SET title=?, description=?, order_index=?, suggested_chapter_count=?, updated_at=?
+                            WHERE id=?
+                        """, (
+                            u['title'],
+                            u.get('description', ''),
+                            u['order_index'],
+                            u['suggested_chapter_count'],
+                            datetime.now().isoformat(),
+                            u['id']
+                        ))
+                    else:
+                        cursor.execute("""
+                            UPDATE story_nodes
+                            SET title=?, description=?, order_index=?, updated_at=?
+                            WHERE id=?
+                        """, (
+                            u['title'],
+                            u.get('description', ''),
+                            u['order_index'],
+                            datetime.now().isoformat(),
+                            u['id']
+                        ))
 
             # 3. 批量插入
             if creates:

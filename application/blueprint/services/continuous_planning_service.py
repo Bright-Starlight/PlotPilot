@@ -7,8 +7,9 @@ import json
 import uuid
 import logging
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
+from enum import Enum
 from json_repair import repair_json
 
 from domain.structure.story_node import StoryNode, NodeType, PlanningStatus, PlanningSource
@@ -26,6 +27,13 @@ from application.audit.services.macro_merge_engine import MacroMergeEngine, Merg
 logger = logging.getLogger(__name__)
 _macro_plan_progress_store: Dict[str, Dict] = {}
 _macro_plan_result_store: Dict[str, Dict] = {}
+
+
+class PlanningMode(str, Enum):
+    """规划确认模式"""
+    SKIP_IF_EXISTS = "skip"      # 已有规划时跳过，返回已有规划
+    APPEND = "append"             # 追加模式：保留已有规划，追加新章节
+    OVERWRITE = "overwrite"       # 覆盖模式：删除已有规划，写入新规划
 
 
 def _sanitize_llm_json_output(raw: str) -> str:
@@ -197,12 +205,18 @@ class ContinuousPlanningService:
         llm_service: LLMService,
         bible_service=None,
         chapter_repository: Optional[ChapterRepository] = None,
+        knowledge_service=None,
+        novel_repository=None,
+        foreshadowing_repository=None,
     ):
         self.story_node_repo = story_node_repo
         self.chapter_element_repo = chapter_element_repo
         self.llm_service = llm_service
         self.bible_service = bible_service
         self.chapter_repository = chapter_repository
+        self.knowledge_service = knowledge_service
+        self.novel_repository = novel_repository
+        self.foreshadowing_repository = foreshadowing_repository
 
     # ==================== 宏观规划 ====================
 
@@ -210,9 +224,21 @@ class ContinuousPlanningService:
         self,
         novel_id: str,
         target_chapters: int,
-        structure_preference: Dict[str, int]
+        structure_preference: Optional[Dict[str, int]]
     ) -> Dict:
-        """生成宏观规划"""
+        """生成宏观规划
+
+        Args:
+            novel_id: 小说 ID
+            target_chapters: 目标章节数
+            structure_preference: 结构偏好配置（None 表示快速生成模式，AI 自主决定）
+                - parts: 部数
+                - volumes_per_part: 每部卷数
+                - acts_per_volume: 每卷幕数
+
+        Returns:
+            包含 success、structure、quality_metrics 的字典
+        """
         import time
         start_time = time.time()
 
@@ -326,6 +352,7 @@ class ContinuousPlanningService:
                 target_chapters=target_chapters,
                 structure_preference=structure_preference,
                 incomplete_acts=incomplete_acts,
+                full_skeleton=skeleton,  # 传递完整结构树
             )
             repair_config = GenerationConfig(
                 max_tokens=self._calculate_precise_repair_max_tokens(incomplete_acts),
@@ -506,8 +533,13 @@ class ContinuousPlanningService:
         required_list_fields = ("plot_points", "key_characters", "key_locations")
         incomplete = []
         for part in skeleton.get("parts", []):
+            part_id = part.get("node_id", "")
+            part_title = part.get("title", "")
             for volume in part.get("volumes", []):
-                for act in volume.get("acts", []):
+                volume_id = volume.get("node_id", "")
+                volume_title = volume.get("title", "")
+                volume_acts = volume.get("acts", [])
+                for act_idx, act in enumerate(volume_acts):
                     missing_fields = [
                         field for field in required_text_fields
                         if not str(act.get(field) or "").strip()
@@ -521,7 +553,25 @@ class ContinuousPlanningService:
                             "node_id": act["node_id"],
                             "title": act.get("title", ""),
                             "description": act.get("description", ""),
+                            "estimated_chapters": act.get("estimated_chapters", 0),
+                            "setup_for": act.get("setup_for", []),
+                            "payoff_from": act.get("payoff_from", []),
                             "missing_fields": missing_fields,
+                            # 层级上下文
+                            "part_id": part_id,
+                            "part_title": part_title,
+                            "volume_id": volume_id,
+                            "volume_title": volume_title,
+                            # 同卷其他幕（用于理解前后关系）
+                            "sibling_acts": [
+                                {
+                                    "node_id": sibling["node_id"],
+                                    "title": sibling.get("title", ""),
+                                    "description": sibling.get("description", ""),
+                                }
+                                for sibling_idx, sibling in enumerate(volume_acts)
+                                if sibling_idx != act_idx
+                            ],
                         })
         return incomplete
 
@@ -834,8 +884,20 @@ class ContinuousPlanningService:
         previous_summary = await self._get_previous_acts_summary(act_node)
         chapter_count = custom_chapter_count or act_node.suggested_chapter_count or 5
 
+        # 获取小说的题材和子类型
+        genre = ""
+        sub_genres: List[str] = []
+        if self.novel_repository:
+            novel = self.novel_repository.get_by_id(
+                NovelId(act_node.novel_id)
+            )
+            if novel:
+                genre = getattr(novel, "genre", "") or ""
+                sub_genres = getattr(novel, "sub_genres", []) or []
+
         prompt = self._build_act_planning_prompt(
-            act_node, bible_context, previous_summary, chapter_count
+            act_node, bible_context, previous_summary, chapter_count,
+            genre=genre, sub_genres=sub_genres
         )
 
         try:
@@ -866,6 +928,15 @@ class ContinuousPlanningService:
             "chapters": chapters,
         }
 
+    def _chapter_node_to_dict(self, chapter_node) -> Dict:
+        """将章节节点转换为字典格式"""
+        return {
+            "number": chapter_node.number,
+            "title": chapter_node.title,
+            "description": chapter_node.description or "",
+            "outline": getattr(chapter_node, "outline", "") or ""
+        }
+
     async def _remove_chapter_children_of_act(self, act_id: str) -> None:
         """同一幕再次确认规划时，先删掉本幕下已有章节节点及对应正文行、元素关联，避免重复堆积。"""
         children = self.story_node_repo.get_children_sync(act_id)
@@ -876,15 +947,41 @@ class ContinuousPlanningService:
                 self.chapter_repository.delete(ChapterId(n.id))
             await self.story_node_repo.delete(n.id)
 
-    async def confirm_act_planning(self, act_id: str, chapters: List[Dict]) -> Dict:
-        """确认幕级规划：写入 story_nodes + chapters 表（供工作台侧栏列表），并关联 Bible 元素。"""
-        logger.info(f"Confirming act planning for act {act_id}")
+    async def confirm_act_planning(
+        self,
+        act_id: str,
+        chapters: List[Dict],
+        mode: PlanningMode = PlanningMode.SKIP_IF_EXISTS
+    ) -> Dict:
+        """确认幕级规划：写入 story_nodes + chapters 表（供工作台侧栏列表），并关联 Bible 元素。
+
+        Args:
+            act_id: 幕ID
+            chapters: 章节列表
+            mode: 规划模式（SKIP_IF_EXISTS=跳过已有规划, APPEND=追加, OVERWRITE=覆盖）
+        """
+        logger.info(f"Confirming act planning for act {act_id}, mode={mode.value}")
 
         act_node = await self.story_node_repo.get_by_id(act_id)
         if not act_node:
             raise ValueError(f"幕节点不存在: {act_id}")
 
-        await self._remove_chapter_children_of_act(act_id)
+        existing_chapters = self.story_node_repo.get_children_sync(act_id)
+        chapter_nodes = [n for n in existing_chapters if n.node_type == NodeType.CHAPTER]
+
+        if mode == PlanningMode.APPEND:
+            logger.info(f"幕 {act_id} 追加模式：已有 {len(chapter_nodes)} 章，将追加 {len(chapters)} 章")
+        elif chapter_nodes and mode == PlanningMode.SKIP_IF_EXISTS:
+            logger.info(f"幕 {act_id} 已有 {len(chapter_nodes)} 个章节规划，跳过覆盖")
+            return {
+                "success": True,
+                "act_id": act_id,
+                "chapters": [self._chapter_node_to_dict(n) for n in chapter_nodes],
+                "skipped": True,
+                "reason": "已有规划，未覆盖"
+            }
+        elif chapter_nodes and mode == PlanningMode.OVERWRITE:
+            await self._remove_chapter_children_of_act(act_id)
 
         novel_id_vo = NovelId(act_node.novel_id)
         existing_book = []
@@ -1064,6 +1161,10 @@ class ContinuousPlanningService:
         data: Dict, order_index: int
     ) -> StoryNode:
         """从数据创建节点"""
+        suggested_count = data.get("suggested_chapter_count")
+        if node_type == NodeType.ACT:
+            logger.info(f"[{novel_id}] 创建幕节点: {data.get('title')}, suggested_chapter_count={suggested_count}")
+
         return StoryNode(
             id=f"{node_type.value}-{uuid.uuid4().hex[:8]}",
             novel_id=novel_id,
@@ -1075,7 +1176,7 @@ class ContinuousPlanningService:
             order_index=order_index,
             planning_status=PlanningStatus.CONFIRMED,
             planning_source=PlanningSource.AI_MACRO,
-            suggested_chapter_count=data.get("suggested_chapter_count"),
+            suggested_chapter_count=suggested_count,
             themes=data.get("themes", []),
             key_events=data.get("key_events", []) if node_type == NodeType.ACT else [],
             narrative_arc=data.get("narrative_arc") if node_type == NodeType.ACT else None,
@@ -1137,7 +1238,7 @@ class ContinuousPlanningService:
                     act_data["number"] = act_number
                     act_id = f"act-{novel_id}-{act_number}"
 
-                    nodes.append({
+                    act_node = {
                         "id": act_id,
                         "novel_id": novel_id,
                         "parent_id": volume_id,
@@ -1146,7 +1247,14 @@ class ContinuousPlanningService:
                         "title": act_data["title"],
                         "description": act_data.get("description", ""),
                         "order_index": order_index,
-                    })
+                    }
+
+                    # 保留前端传递的 suggested_chapter_count
+                    if "suggested_chapter_count" in act_data:
+                        act_node["suggested_chapter_count"] = act_data["suggested_chapter_count"]
+                        logger.info(f"[{novel_id}] 幕 {act_number} ({act_data['title']}) suggested_chapter_count={act_data['suggested_chapter_count']}")
+
+                    nodes.append(act_node)
                     order_index += 1
 
         return nodes
@@ -1843,69 +1951,165 @@ class ContinuousPlanningService:
         target_chapters: int,
         structure_preference: Dict,
         incomplete_acts: List[Dict],
+        full_skeleton: Dict,
     ) -> Prompt:
-        """只为缺字段的幕生成补丁。"""
+        """只为缺字段的幕生成补丁，但提供完整结构和背景信息作为参考。"""
         parts = structure_preference.get('parts', 3)
         volumes_per_part = structure_preference.get('volumes_per_part', 3)
         acts_per_volume = structure_preference.get('acts_per_volume', 3)
         total_acts = max(parts * volumes_per_part * acts_per_volume, 1)
         avg_chapters_per_act = max(target_chapters // total_acts, 1)
 
+        # 【复用第一次生成时的背景信息构建逻辑】
         context_parts = []
+
+        # 世界观
         if bible_context.get("worldview"):
             context_parts.append(f"【世界观】\n{bible_context['worldview']}\n")
+
+        # 角色（带关系和弧光）
         if bible_context.get("characters"):
+            chars = bible_context['characters']
             char_lines = ["【角色设定】"]
-            for c in bible_context["characters"][:8]:
-                char_lines.append(f"- {c.get('name', 'Unknown')} (ID: {c.get('id', 'N/A')}): {c.get('description', '')}")
+            for c in chars[:5]:
+                name = c.get('name', 'Unknown')
+                desc = c.get('description', '')
+                role = c.get('role', '')
+                arc = c.get('character_arc', '')
+                char_id = c.get('id', 'N/A')
+                char_lines.append(f"- {name} (ID: {char_id}) [{role}]: {desc}")
+                if arc:
+                    char_lines.append(f"  人物弧光: {arc}")
             context_parts.append("\n".join(char_lines) + "\n")
+
+        # 角色关系
+        if bible_context.get("relationships"):
+            rel_lines = ["【角色关系】"]
+            for r in bible_context['relationships'][:5]:
+                char1 = r.get('character1', '')
+                char2 = r.get('character2', '')
+                rel_type = r.get('relationship_type', '')
+                rel_desc = r.get('description', '')
+                rel_lines.append(f"- {char1} ↔ {char2} ({rel_type}): {rel_desc}")
+            context_parts.append("\n".join(rel_lines) + "\n")
+
+        # 地点（带叙事功能）
         if bible_context.get("locations"):
             loc_lines = ["【关键地点】"]
-            for l in bible_context["locations"][:8]:
-                loc_lines.append(f"- {l.get('name', 'Unknown')} (ID: {l.get('id', 'N/A')}): {l.get('description', '')}")
+            for l in bible_context['locations'][:5]:
+                name = l.get('name', 'Unknown')
+                desc = l.get('description', '')
+                significance = l.get('significance', '')
+                loc_id = l.get('id', 'N/A')
+                loc_lines.append(f"- {name} (ID: {loc_id}): {desc}")
+                if significance:
+                    loc_lines.append(f"  叙事意义: {significance}")
             context_parts.append("\n".join(loc_lines) + "\n")
+
+        # 时间线事件
+        if bible_context.get("timeline_notes"):
+            time_lines = ["【时间线事件】"]
+            for t in bible_context['timeline_notes'][:5]:
+                event = t.get('event', '')
+                desc = t.get('description', '')
+                impact = t.get('impact', '')
+                time_lines.append(f"- {event}: {desc}")
+                if impact:
+                    time_lines.append(f"  情节影响: {impact}")
+            context_parts.append("\n".join(time_lines) + "\n")
+
         if not context_parts:
             context_parts.append("【世界观与人物】\n暂无详细设定，请补齐通用但完整的叙事字段。\n")
 
-        act_lines = []
+        worldview_context = "\n".join(context_parts)
+
+        # 构建完整的结构树展示
+        structure_tree = ["【已生成的完整结构树】"]
+        for part in full_skeleton.get("parts", []):
+            structure_tree.append(f"\n{part['node_id']}: {part['title']}")
+            structure_tree.append(f"  简介: {part.get('description', '暂无')}")
+            for volume in part.get("volumes", []):
+                structure_tree.append(f"  {volume['node_id']}: {volume['title']}")
+                structure_tree.append(f"    简介: {volume.get('description', '暂无')}")
+                for act in volume.get("acts", []):
+                    structure_tree.append(f"    {act['node_id']}: {act['title']} ({act.get('estimated_chapters', 0)}章)")
+                    structure_tree.append(f"      简介: {act.get('description', '暂无')}")
+                    if act.get("narrative_goal"):
+                        structure_tree.append(f"      叙事目标: {act['narrative_goal']}")
+                    if act.get("plot_points"):
+                        structure_tree.append(f"      情节点: {', '.join(act['plot_points'])}")
+                    if act.get("key_characters"):
+                        structure_tree.append(f"      关键角色: {', '.join(act['key_characters'])}")
+                    if act.get("key_locations"):
+                        structure_tree.append(f"      关键地点: {', '.join(act['key_locations'])}")
+                    if act.get("emotional_arc"):
+                        structure_tree.append(f"      情感曲线: {act['emotional_arc']}")
+                    if act.get("setup_for"):
+                        structure_tree.append(f"      铺垫: {', '.join(act['setup_for'])}")
+                    if act.get("payoff_from"):
+                        structure_tree.append(f"      回收: {', '.join(act['payoff_from'])}")
+
+        # 标记待补全的幕
+        incomplete_ids = {act["node_id"] for act in incomplete_acts}
+        incomplete_summary = ["\n【需要补全的幕】"]
         for act in incomplete_acts:
-            act_lines.append(
-                f'- {act["node_id"]}: 标题《{act["title"]}》；简介《{act["description"]}》；缺失字段：{", ".join(act["missing_fields"])}'
+            incomplete_summary.append(
+                f"- {act['node_id']}: 缺失字段 [{', '.join(act['missing_fields'])}]"
             )
 
-        system_msg = """你是小说结构补全助手。你收到的是已经生成好的幕结构，但有些关键字段为空。
-你的任务是只为这些幕补齐缺失字段，不要改写已有完整字段，不要返回解释文字。"""
+        system_msg = """你是小说结构补全助手。你会收到：
+1. 完整的世界观、角色（含弧光）、角色关系、地点（含叙事意义）、时间线事件等背景信息
+2. 已经生成好的完整结构树（部-卷-幕三层结构，包含所有已填写的字段）
+3. 需要补全的幕列表（标注了缺失哪些字段）
+
+# 核心原则
+1. **参考完整结构树**：理解每个幕在整体叙事中的位置、前后关系、铺垫回收链
+2. **基于背景信息**：严格使用提供的世界观、角色、地点、时间线事件，不要凭空创造
+3. **只填缺失字段**：已有的 title、description、estimated_chapters 等字段绝对不可改动
+4. **保持一致性**：补全内容需与该幕的标题、简介、所属卷部、前后幕的内容逻辑一致
+5. **输出纯 JSON**：不添加任何解释文字
+
+# 字段补全要求
+- narrative_goal: 该幕的叙事目标，需与标题、简介、结构定位一致
+- plot_points: 至少2个具体情节点，需考虑前后幕的情节连贯性和时间线事件
+- key_characters: 至少1个角色（优先使用背景信息中的角色ID，考虑角色弧光和关系）
+- key_locations: 至少1个地点（优先使用背景信息中的地点ID，考虑叙事意义）
+- emotional_arc: 情感曲线，需考虑同卷其他幕的情感走向"""
 
         user_msg = f"""<STORY_CONTEXT>
-{"".join(context_parts)}
+{worldview_context}
 </STORY_CONTEXT>
+
+{"".join(structure_tree)}
+
+{"".join(incomplete_summary)}
 
 【全书约束】
 - 总章数：{target_chapters} 章
 - 结构：{parts} 部 × {volumes_per_part} 卷/部 × {acts_per_volume} 幕/卷
 - 平均每幕：约 {avg_chapters_per_act} 章
 
-【待补全幕】
-{chr(10).join(act_lines)}
-
-请只输出 JSON：
+【输出格式】
+严格输出以下 JSON 结构，每个待补全幕必须对应一条 node_updates：
 {{
   "node_updates": [
     {{
       "node_id": "A1_1_1",
-      "narrative_goal": "不能为空",
-      "plot_points": ["至少 2 条"],
-      "key_characters": ["至少 1 条"],
-      "key_locations": ["至少 1 条"],
-      "emotional_arc": "不能为空"
+      "narrative_goal": "该幕的叙事目标",
+      "plot_points": ["具体情节点1", "具体情节点2"],
+      "key_characters": ["角色ID或名称"],
+      "key_locations": ["地点ID或名称"],
+      "emotional_arc": "情感曲线描述"
     }}
   ]
 }}
 
-要求：
-1. 每个待补全幕都必须返回一条 node_updates。
-2. 只返回缺失字段，不要输出 title、description、estimated_chapters，除非该幕这些字段也为空。
-3. `plot_points` 至少 2 条，`key_characters` 和 `key_locations` 至少各 1 条。"""
+【严格要求】
+1. 必须输出 {len(incomplete_acts)} 条 node_updates（对应 {len(incomplete_acts)} 个待补全幕）
+2. 只输出缺失字段，不要包含已有的 title、description、estimated_chapters、setup_for、payoff_from
+3. 充分参考完整结构树中前后幕的内容，确保情节连贯、不重复、不矛盾
+4. 严格使用 STORY_CONTEXT 中的角色ID和地点ID，考虑角色弧光、角色关系、地点叙事意义、时间线事件
+5. 不要编造新的角色或地点，如果确实需要可标注"待定"但需说明原因"""
         return Prompt(system=system_msg, user=user_msg)
 
     def _build_macro_planning_prompt(self, bible_context: Dict, target_chapters: int, structure_preference: Dict) -> Prompt:
@@ -1928,11 +2132,146 @@ class ContinuousPlanningService:
                 skeleton,
             )
 
-    def _build_act_planning_prompt(self, act_node: StoryNode, bible_context: Dict, previous_summary: Optional[str], chapter_count: int) -> Prompt:
-        """构建幕级规划提示词"""
-        system_msg = """你是一个专业的小说章节规划助手，擅长设计章节大纲和情节安排。
-你的任务是根据提供的信息生成章节规划，即使信息不完整也要生成合理的框架。
-请直接输出 JSON 格式，不要询问额外信息，不要添加任何解释性文字。"""
+    def _select_planning_template(self, genre: str, sub_genres: List[str]) -> tuple[str, Dict[str, str]]:
+        """根据题材和子类型选择规划提示词模板
+
+        Returns:
+            tuple: (template_id, sub_genres_context_dict)
+                - template_id: 'planning-historical', 'planning-xuanhuan', 'planning-hybrid', 或 'planning-act' (默认)
+                - sub_genres_context_dict: 包含 sub_genres_instruction, sub_genres_tone, sub_genres_focus 的字典
+        """
+        genre_lower = (genre or "").lower()
+        sub_genres_lower = [s.lower() for s in (sub_genres or [])]
+
+        # 历史小说
+        if genre_lower in ("history", "historical", "历史"):
+            tone_parts = []
+            focus_parts = []
+            instructions = []
+
+            if any(s in sub_genres_lower for s in ["chaotang", "guānchǎng", "quánmóu"]):
+                instructions.append("【朝堂权谋向】强调派系博弈、历史进程中的关键抉择、朝代政治格局")
+                tone_parts.append("精通历史叙事，注重朝代考据和权谋逻辑")
+                focus_parts.append("派系斗争、政治博弈、关键抉择")
+
+            if any(s in sub_genres_lower for s in ["hougong"]):
+                instructions.append("【后宫/情感向】强调人物关系网、情感张力、身份反转")
+                tone_parts.append("擅长宫斗叙事，注重情感纠葛和人物命运")
+                focus_parts.append("情感纠葛、人物关系、身份反转")
+
+            if any(s in sub_genres_lower for s in ["zhichang"]):
+                instructions.append("【职场/日常向】强调日常积累、势力扩张、打脸节奏")
+                tone_parts.append("擅长职场叙事，注重人物成长和势力积累")
+                focus_parts.append("日常积累、势力扩张、打脸节奏")
+
+            if any(s in sub_genres_lower for s in ["qingsong"]):
+                instructions.append("【轻松/幽默向】强调反套路、幽默叙事、爽感但不沉重")
+                tone_parts.append("轻松幽默，擅长反套路叙事和爽感节奏")
+                focus_parts.append("反套路、幽默、轻松爽感")
+
+            if any(s in sub_genres_lower for s in ["chuanyue"]):
+                instructions.append("【穿越/架空向】强调现代知识运用、信息差优势、历史知识运用")
+                tone_parts.append("擅长穿越叙事，注重信息差和现代知识运用")
+                focus_parts.append("现代知识、信息差、历史知识运用")
+
+            if any(s in sub_genres_lower for s in ["wuxia"]):
+                instructions.append("【武侠/军事向】强调战斗体系、势力纷争、武侠精神")
+                tone_parts.append("精通武侠叙事，注重战斗场面和江湖恩怨")
+                focus_parts.append("战斗场面、江湖恩怨、武侠精神")
+
+            if not instructions:
+                instructions.append("【通用历史向】遵循历史小说创作规范，注重人物塑造和情节推进")
+                tone_parts.append("精通历史叙事，注重朝代考据和故事深度")
+                focus_parts.append("人物塑造、情节推进")
+
+            return "planning-historical", {
+                "sub_genres_instruction": "\n".join(instructions),
+                "sub_genres_tone": "；".join(tone_parts) if tone_parts else "通用历史小说风格",
+                "sub_genres_focus": "、".join(focus_parts) if focus_parts else "人物塑造和情节推进",
+            }
+
+        # 玄幻小说
+        if genre_lower in ("xuanhuan", "玄幻", "仙侠", "fantasy"):
+            tone_parts = []
+            focus_parts = []
+            instructions = []
+
+            if any(s in sub_genres_lower for s in ["xiulian"]):
+                instructions.append("【修炼升级流向】强调境界突破、升级节奏、爽点密度")
+                tone_parts.append("擅长玄幻爽文，精通修炼体系设定和升级节奏控制")
+                focus_parts.append("境界突破、升级节奏、爽点密度")
+
+            if any(s in sub_genres_lower for s in ["fanren"]):
+                instructions.append("【凡人流/苟道流向】强调资源争夺、谨慎发育、越级挑战")
+                tone_parts.append("擅长凡人流叙事，注重生存压力和厚黑发育")
+                focus_parts.append("资源争夺、谨慎发育、越级挑战")
+
+            if any(s in sub_genres_lower for s in ["xitong"]):
+                instructions.append("【系统流向】强调任务奖励、系统任务、量化成长")
+                tone_parts.append("擅长系统流叙事，注重任务奖励和数值反馈")
+                focus_parts.append("任务奖励、系统机制、量化成长")
+
+            if any(s in sub_genres_lower for s in ["wudi"]):
+                instructions.append("【无敌流/爽文流向】强调碾压快感、打脸装逼、极致爽感")
+                tone_parts.append("擅长爽文叙事，注重打脸场面和装逼时刻")
+                focus_parts.append("碾压打脸、装逼时刻、极致爽感")
+
+            if any(s in sub_genres_lower for s in ["wuxian"]):
+                instructions.append("【无限流/综漫向】强调副本切换、多世界冒险、丰富挑战")
+                tone_parts.append("擅长无限流叙事，注重副本结构和多世界切换")
+                focus_parts.append("副本结构、多世界冒险、丰富挑战")
+
+            if not instructions:
+                instructions.append("【通用玄幻向】遵循玄幻小说创作规范，注重修炼体系和爽感节奏")
+                tone_parts.append("擅长玄幻爽文，精通修炼体系设定和升级节奏控制")
+                focus_parts.append("修炼体系、爽感节奏")
+
+            return "planning-xuanhuan", {
+                "sub_genres_instruction": "\n".join(instructions),
+                "sub_genres_tone": "；".join(tone_parts) if tone_parts else "通用玄幻风格",
+                "sub_genres_focus": "、".join(focus_parts) if focus_parts else "修炼体系和爽感节奏",
+            }
+
+        # 混合模式（历史+玄幻）
+        if genre_lower in ("hybrid", "混合"):
+            instructions = [
+                "【历史+玄幻混合模式】历史为表（朝代背景），玄幻为里（修炼/武侠）",
+                "两套逻辑体系自洽：历史朝代格局 + 修炼/武侠体系并行",
+                "双重爽感：权谋博弈 + 升级打脸双线交织",
+            ]
+            return "planning-hybrid", {
+                "sub_genres_instruction": "\n".join(instructions),
+                "sub_genres_tone": "精通历史与玄幻融合叙事，兼顾权谋逻辑和修炼体系",
+                "sub_genres_focus": "历史格局与修炼体系融合、权谋与打脸并行",
+            }
+
+        # 默认通用模板
+        return "planning-act", {
+            "sub_genres_instruction": "",
+            "sub_genres_tone": "",
+            "sub_genres_focus": "",
+        }
+
+    def _build_act_planning_prompt(
+        self,
+        act_node: StoryNode,
+        bible_context: Dict,
+        previous_summary: Optional[str],
+        chapter_count: int,
+        genre: str = "",
+        sub_genres: Optional[List[str]] = None,
+    ) -> Prompt:
+        """构建幕级规划提示词
+
+        Args:
+            act_node: 幕节点
+            bible_context: Bible 上下文
+            previous_summary: 前情摘要
+            chapter_count: 章节数量
+            genre: 题材类型（如：history, xuanhuan, hybrid）
+            sub_genres: 子题材列表
+        """
+        template_id, sub_genres_ctx = self._select_planning_template(genre, sub_genres or [])
 
         # 构建上下文信息
         context_parts = [f"幕信息：《{act_node.title}》"]
@@ -1953,7 +2292,58 @@ class ContinuousPlanningService:
 
         context = "\n".join(context_parts)
 
-        user_msg = f"""{context}
+        # 根据模板ID构建系统提示词
+        if template_id == "planning-historical":
+            system_msg = f"""你是一位精通历史叙事的网文专家，擅长创作以真实历史朝代为背景的网络小说。
+
+{sub_genres_ctx['sub_genres_instruction']}
+
+写作特点：
+1. 强调历史考据感，朝代细节准确（可根据需要调整）
+2. 权谋博弈：派系斗争、政治博弈、人物抉择
+3. 人物塑造：立体饱满，动机合理
+4. 节奏把控：张力递进，爽感与深度并存
+5. 文风定位：{sub_genres_ctx['sub_genres_tone']}
+
+你的任务是为一幕规划生成章节框架。即使信息不完整也要生成合理的框架。
+请直接输出 JSON 格式，不要询问额外信息，不要添加任何解释性文字。"""
+        elif template_id == "planning-xuanhuan":
+            system_msg = f"""你是一位精通玄幻修仙题材的网文大师，擅长创作修炼体系完备、爽感十足的玄幻小说。
+
+{sub_genres_ctx['sub_genres_instruction']}
+
+写作特点：
+1. 修炼体系：境界划分清晰，升级节奏明快
+2. 爽点密度：战斗/打脸/机缘/装逼一条龙
+3. 金手指设定：系统/老爷爷/随身空间等
+4. 越级挑战：合理但不失爽感
+5. 文风定位：{sub_genres_ctx['sub_genres_tone']}
+
+你的任务是为一幕规划生成章节框架。即使信息不完整也要生成合理的框架。
+请直接输出 JSON 格式，不要询问额外信息，不要添加任何解释性文字。"""
+        elif template_id == "planning-hybrid":
+            system_msg = f"""你是一位精通历史与玄幻融合叙事的网文大师，擅长创作历史为表（朝代背景）、玄幻为里（修炼/武侠）的混合题材小说。
+
+{sub_genres_ctx['sub_genres_instruction']}
+
+写作特点：
+1. 历史表面：朝代背景真实可考，政治格局宏大
+2. 修炼内核：修炼体系与历史朝代融合自洽
+3. 双重爽感：权谋博弈+升级打脸双线并行
+4. 格局宏大：个人成长与王朝兴衰交相辉映
+
+你的任务是为一幕规划生成章节框架。即使信息不完整也要生成合理的框架。
+请直接输出 JSON 格式，不要询问额外信息，不要添加任何解释性文字。"""
+        else:
+            system_msg = """你是一个专业的小说章节规划助手，擅长设计章节大纲和情节安排。
+你的任务是为一幕规划生成章节框架。即使信息不完整也要生成合理的框架。
+请直接输出 JSON 格式，不要询问额外信息，不要添加任何解释性文字。"""
+
+        # 子类型侧重点注入到用户消息
+        sub_genres_focus = sub_genres_ctx.get("sub_genres_focus", "")
+        focus_note = f"\n【子类型侧重】{sub_genres_focus}" if sub_genres_focus else ""
+
+        user_msg = f"""{context}{focus_note}
 
 请为这一幕规划 {chapter_count} 个章节。如果没有详细的世界观信息，请生成通用的章节框架。
 
@@ -2197,3 +2587,273 @@ class ContinuousPlanningService:
 }}"""
         
         return Prompt(system=system, user=user)
+
+    # ==================== 续写规划功能 ====================
+
+    async def continue_planning(
+        self,
+        novel_id: str,
+        target_chapter_count: int = 10
+    ) -> Dict:
+        """续写规划：基于已写章节内容 + 小说背景设定生成后续规划
+
+        Args:
+            novel_id: 小说ID
+            target_chapter_count: 续写目标章节数
+
+        Returns:
+            续写规划结果
+        """
+        logger.info(f"Starting continue planning for novel {novel_id}, target chapters: {target_chapter_count}")
+
+        # 1. 获取小说实体（包含 premise 等背景信息）
+        if not self.novel_repository:
+            raise ValueError("novel_repository is required for continue_planning")
+
+        novel = self.novel_repository.get_by_id(NovelId(novel_id))
+        if not novel:
+            raise ValueError(f"小说不存在: {novel_id}")
+
+        # 2. 获取小说的完整背景设定（从 StoryKnowledge）
+        novel_background = await self._get_novel_background(novel_id)
+
+        # 3. 获取已写章节的摘要
+        if not self.chapter_repository:
+            raise ValueError("chapter_repository is required for continue_planning")
+
+        written_chapters = self.chapter_repository.list_by_novel(NovelId(novel_id))
+        written_chapters.sort(key=lambda c: c.number)
+
+        if not written_chapters:
+            raise ValueError("无已写章节，无法续写规划")
+
+        # 4. 提取最近章节的状态和趋势
+        recent_chapters = written_chapters[-5:]
+        recent_summary = await self._summarize_recent_chapters(recent_chapters)
+
+        # 5. 获取 Bible 上下文
+        bible_context = self._get_bible_context(novel_id)
+
+        # 6. 获取待回收伏笔
+        pending_foreshadowings = await self._get_pending_foreshadowings(novel_id)
+
+        # 7. 构建续写规划提示词（携带完整背景）
+        prompt = self._build_continue_planning_prompt(
+            novel_premise=novel.premise,
+            novel_background=novel_background,
+            recent_summary=recent_summary,
+            bible_context=bible_context,
+            pending_foreshadowings=pending_foreshadowings,
+            target_count=target_chapter_count,
+            last_chapter_number=written_chapters[-1].number
+        )
+
+        # 8. 调用 LLM 生成续写规划
+        try:
+            response = await self.llm_service.generate(
+                prompt,
+                GenerationConfig(max_tokens=4096, temperature=0.7)
+            )
+
+            plan = self._parse_llm_response(response)
+
+            # 9. 创建新的幕/卷（如果需要）并确认规划
+            return await self._confirm_continue_planning(novel_id, plan)
+
+        except Exception as e:
+            logger.error(f"续写规划失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def _get_novel_background(self, novel_id: str) -> Dict[str, Any]:
+        """获取小说的完整背景设定
+
+        从 StoryKnowledge 中提取：
+        - premise_lock: 梗概锁定（新书设置向导生成的故事设定）
+        - 核心设定三元组
+
+        Returns:
+            {
+                "premise_lock": "小说梗概",
+                "world_setting": "世界观设定",
+                "core_conflicts": "核心冲突",
+                "character_relationships": "角色关系"
+            }
+        """
+        background = {
+            "premise_lock": "",
+            "world_setting": "",
+            "core_conflicts": "",
+            "character_relationships": ""
+        }
+
+        if not self.knowledge_service:
+            logger.warning("knowledge_service not available, returning empty background")
+            return background
+
+        try:
+            # 获取 StoryKnowledge
+            knowledge = self.knowledge_service.get_knowledge(novel_id)
+
+            # 1. 梗概锁定（最重要的背景信息）
+            if hasattr(knowledge, 'premise_lock') and knowledge.premise_lock:
+                background["premise_lock"] = knowledge.premise_lock
+
+            # 2. 从知识三元组中提取核心设定（单次遍历优化）
+            if hasattr(knowledge, 'facts') and knowledge.facts:
+                world_facts = []
+                conflict_facts = []
+                relation_facts = []
+
+                for f in knowledge.facts:
+                    if f.predicate in ["世界观", "设定", "背景", "时代"]:
+                        world_facts.append(f)
+                    elif f.predicate in ["冲突", "对立", "矛盾", "敌对"]:
+                        conflict_facts.append(f)
+                    elif f.predicate in ["关系", "是", "属于", "师徒", "朋友", "敌人"]:
+                        relation_facts.append(f)
+
+                if world_facts:
+                    background["world_setting"] = "\n".join(
+                        f"- {f.subject} {f.predicate} {f.object}"
+                        for f in world_facts[:5]
+                    )
+
+                if conflict_facts:
+                    background["core_conflicts"] = "\n".join(
+                        f"- {f.subject} {f.predicate} {f.object}"
+                        for f in conflict_facts[:5]
+                    )
+
+                if relation_facts:
+                    background["character_relationships"] = "\n".join(
+                        f"- {f.subject} {f.predicate} {f.object}"
+                        for f in relation_facts[:10]
+                    )
+
+        except Exception as e:
+            logger.warning(f"获取小说背景设定失败: {e}")
+
+        return background
+
+    async def _summarize_recent_chapters(self, chapters: List[Chapter]) -> str:
+        """总结最近章节的内容和趋势"""
+        summaries = []
+        for ch in chapters:
+            if ch.content:
+                # 提取章节摘要（可以调用 LLM 或使用已有的 state）
+                summary = f"第{ch.number}章《{ch.title}》: {ch.content[:200]}..."
+                summaries.append(summary)
+        return "\n".join(summaries)
+
+    async def _get_pending_foreshadowings(self, novel_id: str) -> List[Dict]:
+        """获取待回收伏笔"""
+        if not self.foreshadowing_repository:
+            return []
+
+        try:
+            registry = self.foreshadowing_repository.get_by_novel_id(NovelId(novel_id))
+            if not registry:
+                return []
+
+            # 筛选未回收的伏笔
+            pending = [f for f in registry.foreshadowings if not f.is_resolved]
+            return [
+                {"description": f.description, "chapter": f.chapter_number}
+                for f in pending
+            ]
+        except Exception as e:
+            logger.warning(f"获取待回收伏笔失败: {e}")
+            return []
+
+    def _build_continue_planning_prompt(
+        self,
+        novel_premise: str,
+        novel_background: Dict[str, Any],
+        recent_summary: str,
+        bible_context: Dict,
+        pending_foreshadowings: List[Dict],
+        target_count: int,
+        last_chapter_number: int
+    ) -> Prompt:
+        """构建续写规划提示词（携带完整背景）"""
+        system_msg = """你是专业的小说续写规划助手。
+你的任务是基于小说的背景设定、已写章节的内容和趋势，规划后续章节的发展。
+必须确保：
+1. 严格遵循小说的背景设定和世界观
+2. 延续已有剧情的逻辑和风格
+3. 回收待解决的伏笔
+4. 推进主要故事线
+5. 保持角色行为的一致性"""
+
+        # 构建背景信息部分
+        background_section = f"""=== 小说背景设定 ===
+梗概：{novel_premise or '无'}
+
+故事设定：
+{novel_background.get('premise_lock', '无')}
+
+世界观：
+{novel_background.get('world_setting', '无')}
+
+核心冲突：
+{novel_background.get('core_conflicts', '无')}
+
+角色关系：
+{novel_background.get('character_relationships', '无')}
+"""
+
+        user_msg = f"""{background_section}
+
+=== 最近章节摘要 ===
+{recent_summary}
+
+=== 待回收伏笔 ===
+{chr(10).join(f"- {f['description']} (第{f['chapter']}章埋下)" for f in pending_foreshadowings) if pending_foreshadowings else '无'}
+
+=== 可用人物 ===
+{chr(10).join(f"- {c['name']}: {c.get('description', '')[:50]}" for c in bible_context.get('characters', [])[:10])}
+
+=== 可用地点 ===
+{chr(10).join(f"- {l['name']}: {l.get('description', '')[:50]}" for l in bible_context.get('locations', [])[:10])}
+
+请基于以上信息，规划后续 {target_count} 个章节（从第 {last_chapter_number + 1} 章开始）。
+
+⚠️ 重要约束：
+1. 必须严格遵循「小说背景设定」中的世界观和核心冲突
+2. 必须延续「最近章节摘要」中的剧情逻辑
+3. 优先回收「待回收伏笔」
+4. 合理使用「可用人物」和「可用地点」
+
+输出 JSON 格式：
+{{
+  "acts": [
+    {{
+      "title": "幕标题",
+      "description": "幕描述",
+      "suggested_chapter_count": 5,
+      "chapters": [
+        {{
+          "number": {last_chapter_number + 1},
+          "title": "章节标题",
+          "outline": "章节大纲（100-200字）",
+          "description": "章节简介"
+        }}
+      ]
+    }}
+  ]
+}}"""
+
+        return Prompt(system=system_msg, user=user_msg)
+
+    async def _confirm_continue_planning(self, novel_id: str, plan: Dict) -> Dict:
+        """确认续写规划：创建新的幕/卷并确认章节规划"""
+        # TODO: 实现创建新幕/卷的逻辑
+        # 这里需要根据 plan 中的 acts 创建新的幕节点，并调用 confirm_act_planning
+        logger.info(f"Confirming continue planning for novel {novel_id}")
+        return {
+            "success": True,
+            "plan": plan
+        }

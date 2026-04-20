@@ -56,6 +56,16 @@
                     <n-select v-model:value="newBook.genre" :options="genreOptions" placeholder="选择类型" />
                   </n-form-item>
                 </n-gi>
+                <n-gi v-if="newBook.genre === 'history' || newBook.genre === 'xuanhuan'">
+                  <n-form-item label="子题材">
+                    <n-select
+                      v-model:value="newBook.sub_genres"
+                      :options="subGenreOptions"
+                      multiple
+                      placeholder="选择子题材（可选）"
+                    />
+                  </n-form-item>
+                </n-gi>
                 <n-gi>
                   <n-form-item label="章节数">
                     <n-input-number v-model:value="newBook.chapters" :min="1" :max="9999" class="w-full" placeholder="默认 100 章" />
@@ -67,6 +77,59 @@
                   </n-form-item>
                 </n-gi>
               </n-grid>
+
+              <!-- 结构规划参数 -->
+              <n-divider style="margin: 20px 0">结构规划</n-divider>
+
+              <n-space vertical :size="16">
+                <n-form-item label="规划模式" label-placement="left">
+                  <n-radio-group v-model:value="newBook.planMode">
+                    <n-space>
+                      <n-radio value="quick">⚡ 快速生成</n-radio>
+                      <n-radio value="precise">📐 精密定制</n-radio>
+                    </n-space>
+                  </n-radio-group>
+                </n-form-item>
+
+                <n-alert v-if="newBook.planMode === 'quick'" type="info" size="small" :show-icon="false">
+                  AI 将基于世界观和人物自动生成最优结构
+                </n-alert>
+
+                <template v-if="newBook.planMode === 'precise'">
+                  <n-form-item label="结构分布" label-placement="left">
+                    <n-space :size="12" align="center" wrap>
+                      <n-space align="center" :size="4">
+                        <n-text style="font-size:13px">部</n-text>
+                        <n-input-number v-model:value="newBook.structure.parts" :min="1" :max="10" style="width:72px" size="small" />
+                      </n-space>
+                      <n-text depth="3">×</n-text>
+                      <n-space align="center" :size="4">
+                        <n-text style="font-size:13px">卷/部</n-text>
+                        <n-input-number v-model:value="newBook.structure.volumes_per_part" :min="1" :max="10" style="width:72px" size="small" />
+                      </n-space>
+                      <n-text depth="3">×</n-text>
+                      <n-space align="center" :size="4">
+                        <n-text style="font-size:13px">幕/卷</n-text>
+                        <n-input-number v-model:value="newBook.structure.acts_per_volume" :min="1" :max="10" style="width:72px" size="small" />
+                      </n-space>
+                      <n-tag type="info" size="small" round>
+                        共 {{ totalActs }} 幕
+                      </n-tag>
+                    </n-space>
+                  </n-form-item>
+
+                  <n-alert v-if="chaptersPerAct > 0" type="default" size="small" :show-icon="false">
+                    <n-space vertical :size="4">
+                      <n-text depth="2" style="font-size: 12px">
+                        💡 节奏预览：平均每幕约 <n-text strong>{{ chaptersPerAct }}</n-text> 章
+                      </n-text>
+                      <n-text depth="3" style="font-size: 11px">
+                        {{ pacingHint }}
+                      </n-text>
+                    </n-space>
+                  </n-alert>
+                </template>
+              </n-space>
             </div>
 
             <n-space justify="end">
@@ -433,8 +496,15 @@ const newBook = ref({
   title: '',
   premise: '',
   genre: '',
+  sub_genres: [] as string[],
   chapters: 100,  // 默认 100 章
   words: 2500,
+  planMode: 'quick' as 'quick' | 'precise',
+  structure: {
+    parts: 1,
+    volumes_per_part: 1,
+    acts_per_volume: 4,
+  },
 })
 
 const genreOptions = [
@@ -450,6 +520,51 @@ const genreOptions = [
   { label: '言情', value: 'romance' },
   { label: '其他', value: 'other' },
 ]
+
+const historySubGenres = [
+  { label: '朝堂权谋', value: 'chaotang' },
+  { label: '后宫', value: 'hougong' },
+  { label: '职场', value: 'zhichang' },
+  { label: '轻松', value: 'qingsong' },
+  { label: '穿越', value: 'chuanyue' },
+  { label: '武侠', value: 'wuxia' },
+]
+
+const xuanhuanSubGenres = [
+  { label: '修炼升级流', value: 'xiulian' },
+  { label: '凡人流', value: 'fanren' },
+  { label: '系统流', value: 'xitong' },
+  { label: '无敌流', value: 'wudi' },
+  { label: '无限流', value: 'wuxian' },
+]
+
+const subGenreOptions = computed(() => {
+  if (newBook.value.genre === 'history') return historySubGenres
+  if (newBook.value.genre === 'xuanhuan') return xuanhuanSubGenres
+  return []
+})
+
+// 计算总幕数
+const totalActs = computed(() =>
+  newBook.value.structure.parts * newBook.value.structure.volumes_per_part * newBook.value.structure.acts_per_volume
+)
+
+// 节奏预览：平均每幕章数
+const chaptersPerAct = computed(() => {
+  if (totalActs.value === 0) return 0
+  return Math.floor((newBook.value.chapters || 100) / totalActs.value)
+})
+
+// 节奏感知提示
+const pacingHint = computed(() => {
+  const avg = chaptersPerAct.value
+  if (avg === 0) return ''
+  if (avg <= 5) return '极速节奏：适合短篇或快节奏爽文'
+  if (avg <= 15) return '紧凑节奏：适合美剧式快节奏叙事'
+  if (avg <= 30) return '标准节奏：适合传统长篇小说'
+  if (avg <= 50) return '舒缓节奏：适合慢热修仙/史诗类'
+  return '超长节奏：适合超大型史诗巨著'
+})
 
 const filteredBooks = computed(() => {
   if (!searchQuery.value.trim()) {
@@ -554,6 +669,11 @@ const handleCreate = async () => {
       target_words_per_chapter: newBook.value.words || 2500,
       premise: newBook.value.premise,
       genre: newBook.value.genre || '',
+      sub_genres: newBook.value.sub_genres || [],
+      planning_config: {
+        plan_mode: newBook.value.planMode,
+        structure: newBook.value.planMode === 'precise' ? newBook.value.structure : undefined,
+      },
     }
 
     const result = await novelApi.createNovel(payload)

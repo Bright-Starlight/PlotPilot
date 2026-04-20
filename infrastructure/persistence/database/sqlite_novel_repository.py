@@ -3,7 +3,7 @@ import logging
 import json
 from typing import Optional, List
 from datetime import datetime
-from domain.novel.entities.novel import Novel, AutopilotStatus, NovelStage
+from domain.novel.entities.novel import Novel, AutopilotStatus, NovelStage, PlanningConfig
 from domain.novel.value_objects.novel_id import NovelId
 from domain.novel.repositories.novel_repository import NovelRepository
 from infrastructure.persistence.database.connection import DatabaseConnection
@@ -29,11 +29,11 @@ class SqliteNovelRepository(NovelRepository):
                 last_audit_narrative_ok, last_audit_at,
                 last_audit_vector_stored, last_audit_foreshadow_stored,
                 last_audit_triples_extracted, last_audit_quality_scores, last_audit_issues,
-                target_words_per_chapter, genre, theme_agent_enabled,
-                enabled_theme_skills,
+                target_words_per_chapter, genre, sub_genres, theme_agent_enabled,
+                enabled_theme_skills, planning_config,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 slug = excluded.slug,
@@ -62,8 +62,10 @@ class SqliteNovelRepository(NovelRepository):
                 last_audit_issues = excluded.last_audit_issues,
                 target_words_per_chapter = excluded.target_words_per_chapter,
                 genre = excluded.genre,
+                sub_genres = excluded.sub_genres,
                 theme_agent_enabled = excluded.theme_agent_enabled,
                 enabled_theme_skills = excluded.enabled_theme_skills,
+                planning_config = excluded.planning_config,
                 updated_at = excluded.updated_at
         """
         now = datetime.utcnow().isoformat()
@@ -98,9 +100,24 @@ class SqliteNovelRepository(NovelRepository):
         lai_json = json.dumps(lai) if lai else None
         twpc = getattr(novel, "target_words_per_chapter", 3500)
         genre = getattr(novel, "genre", "")
+        sub_genres = getattr(novel, "sub_genres", []) or []
+        sub_genres_json = json.dumps(sub_genres) if sub_genres else "[]"
         theme_agent_enabled = 1 if getattr(novel, "theme_agent_enabled", False) else 0
         ets = getattr(novel, "enabled_theme_skills", [])
         enabled_theme_skills_json = json.dumps(ets if ets else [])
+
+        # 序列化 planning_config
+        planning_config_obj = getattr(novel, "planning_config", None)
+        if planning_config_obj:
+            planning_config_json = json.dumps({
+                "plan_mode": getattr(planning_config_obj, "plan_mode", "quick"),
+                "parts": getattr(planning_config_obj, "parts", 1),
+                "volumes_per_part": getattr(planning_config_obj, "volumes_per_part", 1),
+                "acts_per_volume": getattr(planning_config_obj, "acts_per_volume", 4),
+                "chapters_per_act": getattr(planning_config_obj, "chapters_per_act", 5),  # 向后兼容
+            })
+        else:
+            planning_config_json = None
 
         self.db.execute(sql, (
             novel_id,
@@ -131,8 +148,10 @@ class SqliteNovelRepository(NovelRepository):
             lai_json,
             twpc,
             genre,
+            sub_genres_json,
             theme_agent_enabled,
             enabled_theme_skills_json,
+            planning_config_json,
             now,
             now
         ))
@@ -196,7 +215,24 @@ class SqliteNovelRepository(NovelRepository):
         laqs = json.loads(laqs_json) if laqs_json else {}
         lai_json = row.get("last_audit_issues")
         lai = json.loads(lai_json) if lai_json else []
-        
+
+        # 解析 planning_config
+        planning_config_json = row.get("planning_config")
+        planning_config = None
+        if planning_config_json:
+            try:
+                pc_dict = json.loads(planning_config_json)
+                planning_config = PlanningConfig(
+                    plan_mode=pc_dict.get("plan_mode", "quick"),
+                    parts=pc_dict.get("parts", 1),
+                    volumes_per_part=pc_dict.get("volumes_per_part", 1),
+                    acts_per_volume=pc_dict.get("acts_per_volume", 4),
+                    chapters_per_act=pc_dict.get("chapters_per_act", 5),  # 向后兼容
+                )
+            except (json.JSONDecodeError, TypeError, KeyError) as e:
+                logger.warning(f"Failed to parse planning_config: {e}")
+                planning_config = None
+
         return Novel(
             id=novel_id,
             title=row['title'],
@@ -225,8 +261,10 @@ class SqliteNovelRepository(NovelRepository):
             last_audit_issues=lai,
             target_words_per_chapter=row.get("target_words_per_chapter", 3500),
             genre=row.get("genre", ""),
+            sub_genres=json.loads(row.get("sub_genres", "[]") or "[]"),
             theme_agent_enabled=bool(row.get("theme_agent_enabled", 0)),
             enabled_theme_skills=json.loads(row.get("enabled_theme_skills", "[]") or "[]"),
+            planning_config=planning_config,
         )
 
     def delete(self, novel_id: NovelId) -> None:

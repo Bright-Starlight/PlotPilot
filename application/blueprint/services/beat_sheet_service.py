@@ -39,6 +39,7 @@ class BeatSheetService:
         llm_service: LLMService,
         vector_store: "ChromaDBVectorStore",
         bible_service=None,
+        novel_repo=None,
     ):
         self.beat_sheet_repo = beat_sheet_repo
         self.chapter_repo = chapter_repo
@@ -46,6 +47,7 @@ class BeatSheetService:
         self.llm_service = llm_service
         self.vector_store = vector_store
         self.bible_service = bible_service
+        self.novel_repo = novel_repo
 
     async def generate_beat_sheet(
         self,
@@ -54,6 +56,8 @@ class BeatSheetService:
         *,
         plan_version: int | None = None,
         state_lock_version: int | None = None,
+        target_beat_count: int | None = None,
+        target_words_per_chapter: int | None = None,
     ) -> BeatSheet:
         """为章节生成节拍表
 
@@ -62,6 +66,8 @@ class BeatSheetService:
             outline: 章节大纲
             plan_version: 规划版本（可选）
             state_lock_version: 状态锁版本（必填）
+            target_beat_count: 目标节拍数量（可选，不传则自动计算）
+            target_words_per_chapter: 目标章节字数（可选，不传则从小说配置获取）
 
         Returns:
             生成的节拍表
@@ -71,11 +77,46 @@ class BeatSheetService:
             raise ValueError("state_lock_version is required before beat sheet generation")
         effective_state_lock_version = state_lock_version
 
+        from domain.novel.value_objects.chapter_id import ChapterId
+        from application.blueprint.services.beat_calculator import BeatCalculator
+        from application.config import AppConfig
+
+        chapter = self.chapter_repo.get_by_id(ChapterId(chapter_id))
+        if not chapter:
+            raise ValueError(f"Chapter {chapter_id} not found")
+
+        if target_words_per_chapter is None:
+            if self.novel_repo:
+                novel = self.novel_repo.get_by_id(chapter.novel_id)
+                target_words_per_chapter = novel.target_words_per_chapter if novel else AppConfig.DEFAULT_WORDS_PER_CHAPTER
+            else:
+                target_words_per_chapter = AppConfig.DEFAULT_WORDS_PER_CHAPTER
+
+        if target_beat_count is None:
+            target_beat_count = BeatCalculator.calculate_beat_count(target_words_per_chapter)
+
+        words_per_beat = BeatCalculator.calculate_words_per_beat(
+            target_words_per_chapter,
+            target_beat_count
+        )
+
+        logger.info(
+            f"Target words per chapter: {target_words_per_chapter}, "
+            f"Beat count: {target_beat_count}, "
+            f"Words per beat: {words_per_beat}"
+        )
+
         # 1. 混合检索：获取相关上下文
         context = await self._retrieve_relevant_context(chapter_id, outline)
 
         # 2. 构建提示词
-        prompt = self._build_beat_sheet_prompt(outline, context)
+        prompt = self._build_beat_sheet_prompt(
+            outline,
+            context,
+            target_words_per_chapter,
+            target_beat_count=target_beat_count,
+            words_per_beat=words_per_beat
+        )
 
         # 3. 调用 LLM 生成节拍表
         config = GenerationConfig(max_tokens=2048, temperature=0.7)
@@ -342,38 +383,70 @@ class BeatSheetService:
     def _build_beat_sheet_prompt(
         self,
         outline: str,
-        context: Dict
+        context: Dict,
+        target_words_per_chapter: int = 3500,
+        target_beat_count: int = 4,
+        words_per_beat: List[int] = None
     ) -> Prompt:
-        """构建节拍表生成提示词（使用增强的上下文）"""
+        """构建节拍表生成提示词（使用动态节拍数和字数分配）
 
-        system_prompt = """你是一位专业的小说编剧，擅长将章节大纲拆解为具体的场景（Scene）。
+        Args:
+            outline: 章节大纲
+            context: 上下文信息
+            target_words_per_chapter: 目标章节字数
+            target_beat_count: 目标节拍数量
+            words_per_beat: 每个节拍的目标字数列表
+        """
 
-你的任务是将章节大纲拆解为 3-5 个场景，每个场景应该：
+        if words_per_beat is None or len(words_per_beat) != target_beat_count:
+            # 降级：平均分配
+            avg_words = target_words_per_chapter // target_beat_count
+            words_per_beat = [avg_words] * target_beat_count
+
+        # 计算总字数范围
+        total_words_min = int(target_words_per_chapter * 0.8)  # 80%
+        total_words_max = int(target_words_per_chapter * 1.2)  # 120%
+
+        system_prompt = f"""你是一位专业的小说编剧，擅长将章节大纲拆解为具体的场景（Scene）。
+
+⚠️ 核心原则：必须严格遵循章节大纲，不得偏离大纲的核心场景、任务和终态。
+
+你的任务是将章节大纲拆解为 {target_beat_count} 个场景，每个场景应该：
 1. 有明确的场景目标（Scene Goal）
 2. 指定 POV 角色（从哪个角色的视角叙述）
 3. 指定地点（可选）
 4. 指定情绪基调（例如：紧张、温馨、悲伤、激烈）
-5. 预估字数（每个场景 500-1000 字）
+5. 预估字数（根据下面的分配）
+
+场景字数分配：
+{chr(10).join(f"- 场景 {i+1}: {words} 字" for i, words in enumerate(words_per_beat))}
 
 请以 JSON 格式返回场景列表，格式如下：
-{
+{{
   "scenes": [
-    {
+    {{
       "title": "场景标题",
       "goal": "这个场景要达成什么目标",
       "pov_character": "POV 角色名称",
       "location": "地点（可选）",
       "tone": "情绪基调",
-      "estimated_words": 800
-    }
+      "estimated_words": {words_per_beat[0]}
+    }}
   ]
-}
+}}
+
+⚠️ 严格约束：
+- 场景必须在大纲指定的地点发生
+- 场景必须推进大纲指定的任务
+- 场景必须包含大纲指定的冲突
+- 最后一个场景的终态必须与大纲的终态一致
+- 上下文信息（故事线、伏笔）仅作为参考，不得替代大纲内容
 
 注意事项：
 - 场景之间要有逻辑连贯性
 - 每个场景聚焦一个明确目标，避免贪多
 - POV 角色应该是章节中的主要角色
-- 预估字数总和应该在 2000-4000 字之间
+- 预估字数总和应该在 {total_words_min}-{total_words_max} 字之间（目标：{target_words_per_chapter} 字）
 - 充分利用提供的上下文信息（人物、故事线、伏笔、地点、时间线）
 """
 
@@ -419,7 +492,7 @@ class BeatSheetService:
             for event in context["timeline_events"]:
                 user_prompt += f"- 第 {event['chapter']} 章: {event['description']} ({event['time_type']})\n"
 
-        user_prompt += "\n请基于以上信息生成场景列表（JSON 格式）："
+        user_prompt += f"\n请基于以上信息生成 {target_beat_count} 个场景（JSON 格式）："
 
         return Prompt(
             system=system_prompt,

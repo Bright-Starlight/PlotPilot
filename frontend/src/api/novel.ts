@@ -24,6 +24,7 @@ export interface NovelDTO {
   autopilot_status?: string
   auto_approve_mode?: boolean
   genre?: string
+  sub_genres?: string[]
   theme_agent_enabled?: boolean
   enabled_theme_skills?: string[]
 }
@@ -53,6 +54,14 @@ export const novelApi = {
     target_words_per_chapter?: number
     premise?: string
     genre?: string
+    planning_config?: {
+      plan_mode: 'quick' | 'precise'
+      structure?: {
+        parts: number
+        volumes_per_part: number
+        acts_per_volume: number
+      }
+    }
   }) => apiClient.post<NovelDTO>('/novels', data) as Promise<NovelDTO>,
 
   /**

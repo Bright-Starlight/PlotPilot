@@ -1,10 +1,41 @@
 # domain/novel/entities/novel.py
+from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Dict, Any
 from domain.shared.base_entity import BaseEntity
 from domain.novel.value_objects.novel_id import NovelId
 from domain.novel.entities.chapter import Chapter, ChapterStatus
 from domain.shared.exceptions import InvalidOperationError
+
+
+@dataclass
+class PlanningConfig:
+    """规划配置"""
+    plan_mode: str = "quick"  # 规划模式：quick（快速生成）或 precise（精密定制）
+
+    # 精密定制模式的结构偏好
+    parts: int = 1  # 部数
+    volumes_per_part: int = 1  # 每部卷数
+    acts_per_volume: int = 4  # 每卷幕数
+
+    # 向后兼容的旧字段（已废弃，保留用于迁移）
+    chapters_per_act: int = 5  # 每幕章节数（默认5）
+
+    # 动态计算
+    @property
+    def chapters_per_volume(self) -> int:
+        """每卷章节数"""
+        return self.chapters_per_act * self.acts_per_volume
+
+    @property
+    def chapters_per_part(self) -> int:
+        """每部章节数"""
+        return self.chapters_per_volume * self.volumes_per_part
+
+    @property
+    def total_acts(self) -> int:
+        """总幕数"""
+        return self.parts * self.volumes_per_part * self.acts_per_volume
 
 
 class NovelStage(str, Enum):
@@ -63,10 +94,14 @@ class Novel(BaseEntity):
         target_words_per_chapter: int = 3500,  # 默认值由 AppConfig.DEFAULT_WORDS_PER_CHAPTER 管理
         # 题材类型（可选，用于加载专项题材 Agent）
         genre: str = "",
+        # 子题材类型列表（如 ["后宫", "职场", "轻松"]）
+        sub_genres: Optional[List[str]] = None,
         # 是否启用专项题材 Agent（开关，默认关闭走通用路线）
         theme_agent_enabled: bool = False,
         # 已启用的增强技能 key 列表（如 ["cultivation_system", "battle_choreography"]）
         enabled_theme_skills: Optional[List[str]] = None,
+        # 规划配置（全局统一）
+        planning_config: Optional[PlanningConfig] = None,
     ):
         super().__init__(id.value)
         self.novel_id = id
@@ -107,10 +142,14 @@ class Novel(BaseEntity):
         self.target_words_per_chapter = target_words_per_chapter
         # 题材类型
         self.genre = genre
+        # 子题材类型列表
+        self.sub_genres: List[str] = sub_genres or []
         # 是否启用专项题材 Agent
         self.theme_agent_enabled = theme_agent_enabled
         # 已启用的增强技能列表
         self.enabled_theme_skills: List[str] = enabled_theme_skills or []
+        # 规划配置
+        self.planning_config = planning_config or PlanningConfig()
 
     def add_chapter(self, chapter: Chapter) -> None:
         """添加章节（必须连续）"""

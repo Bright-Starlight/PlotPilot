@@ -327,75 +327,109 @@ class ChapterAftermathPipeline:
                 return result
 
         if self._chapter_fusion_service is not None and quality_gate_mode in {"full", "retry"}:
+            # retry 模式下，如果设置了 skip_fusion_generation，则只执行验证，不重新生成融合草稿
+            skip_fusion = result.get("skip_fusion_generation", False)
+
             try:
-                beat_sheet_repo = getattr(self._chapter_fusion_service, "beat_sheet_repository", None)
-                beat_sheet = await beat_sheet_repo.get_by_chapter_id(chapter.id) if beat_sheet_repo else None
-                state_lock_version = int(result.get("state_lock_version") or 0)
-                plan_version = int(result.get("plan_version") or 0)
-                stored_state_lock_version = int(getattr(beat_sheet, "state_lock_version", 0) or 0) if beat_sheet else 0
-                stored_plan_version = int(getattr(beat_sheet, "plan_version", 0) or 0) if beat_sheet else 0
-                needs_refresh = (
-                    beat_sheet is None
-                    or not getattr(beat_sheet, "scenes", None)
-                    or stored_state_lock_version != state_lock_version
-                    or stored_plan_version != plan_version
-                )
-
-                if needs_refresh:
-                    if self._beat_sheet_service is None:
-                        raise ValueError("Beat sheet service is unavailable to refresh stale beat sheet")
-                    outline_text = str(getattr(chapter, "outline", "") or getattr(chapter, "content", "") or "").strip()
-                    if not outline_text:
-                        raise ValueError("Chapter outline is required before beat sheet generation")
-                    logger.info(
-                        "quality gate beat sheet refresh novel=%s ch=%s plan_version=%s state_lock_version=%s stale=%s",
-                        novel_id,
-                        chapter_number,
-                        plan_version,
-                        state_lock_version,
-                        stored_state_lock_version != state_lock_version or stored_plan_version != plan_version,
+                if not skip_fusion:
+                    # full 模式：生成新的融合草稿
+                    beat_sheet_repo = getattr(self._chapter_fusion_service, "beat_sheet_repository", None)
+                    beat_sheet = await beat_sheet_repo.get_by_chapter_id(chapter.id) if beat_sheet_repo else None
+                    state_lock_version = int(result.get("state_lock_version") or 0)
+                    plan_version = int(result.get("plan_version") or 0)
+                    stored_state_lock_version = int(getattr(beat_sheet, "state_lock_version", 0) or 0) if beat_sheet else 0
+                    stored_plan_version = int(getattr(beat_sheet, "plan_version", 0) or 0) if beat_sheet else 0
+                    needs_refresh = (
+                        beat_sheet is None
+                        or not getattr(beat_sheet, "scenes", None)
+                        or stored_state_lock_version != state_lock_version
+                        or stored_plan_version != plan_version
                     )
-                    beat_sheet = await self._beat_sheet_service.generate_beat_sheet(
+
+                    if needs_refresh:
+                        if self._beat_sheet_service is None:
+                            raise ValueError("Beat sheet service is unavailable to refresh stale beat sheet")
+                        outline_text = str(getattr(chapter, "outline", "") or getattr(chapter, "content", "") or "").strip()
+                        if not outline_text:
+                            raise ValueError("Chapter outline is required before beat sheet generation")
+
+                        from application.blueprint.services.beat_calculator import BeatCalculator
+                        from application.config import AppConfig
+
+                        target_words_per_chapter = AppConfig.DEFAULT_WORDS_PER_CHAPTER
+                        if self._novel_repository:
+                            novel = self._novel_repository.get_by_id(chapter.novel_id)
+                            if novel:
+                                target_words_per_chapter = novel.target_words_per_chapter
+
+                        target_beat_count = BeatCalculator.calculate_beat_count(target_words_per_chapter)
+
+                        logger.info(
+                            "quality gate beat sheet refresh novel=%s ch=%s plan_version=%s state_lock_version=%s stale=%s beat_count=%s",
+                            novel_id,
+                            chapter_number,
+                            plan_version,
+                            state_lock_version,
+                            stored_state_lock_version != state_lock_version or stored_plan_version != plan_version,
+                            target_beat_count,
+                        )
+                        beat_sheet = await self._beat_sheet_service.generate_beat_sheet(
+                            chapter_id=chapter.id,
+                            outline=outline_text,
+                            plan_version=plan_version or None,
+                            state_lock_version=state_lock_version,
+                            target_beat_count=target_beat_count,
+                            target_words_per_chapter=target_words_per_chapter,
+                        )
+
+                    if beat_sheet is None or not getattr(beat_sheet, "scenes", None):
+                        raise ValueError("Beat sheet not found")
+
+                    beat_ids = [f"{chapter.id}-beat-{index + 1}" for index, _ in enumerate(beat_sheet.scenes)]
+                    target_words = self._resolve_target_words(novel_id)
+                    suspense_budget = {"primary": 0, "secondary": 0}
+                    state_lock_version = int(result.get("state_lock_version") or getattr(beat_sheet, "state_lock_version", 0) or 0)
+                    if state_lock_version <= 0:
+                        raise ValueError("State lock version is required before fusion")
+
+                    job = self._chapter_fusion_service.create_job(
                         chapter_id=chapter.id,
-                        outline=outline_text,
-                        plan_version=plan_version or None,
+                        plan_version=int(result.get("plan_version") or getattr(beat_sheet, "plan_version", 0) or 0),
                         state_lock_version=state_lock_version,
+                        beat_ids=beat_ids,
+                        target_words=target_words,
+                        suspense_budget=suspense_budget,
+                    )
+                    job = await self._chapter_fusion_service.run_job(job.fusion_job_id)
+                    draft = getattr(job, "fusion_draft", None)
+                    if draft is None:
+                        raise ValueError("Fusion draft was not created")
+
+                    result["fusion_id"] = draft.fusion_id
+                    result["fusion_job_id"] = job.fusion_job_id
+                    result["fusion_status"] = job.status
+                else:
+                    # retry 模式：使用现有的融合草稿
+                    draft = self._chapter_fusion_service.fusion_repository.get_latest_draft_for_chapter(chapter.id)
+                    if draft is None:
+                        raise ValueError("No existing fusion draft found for retry validation")
+                    result["fusion_id"] = draft.fusion_id
+                    result["fusion_status"] = "reused"
+                    logger.info(
+                        "retry 模式：复用现有融合草稿 novel=%s ch=%s fusion_id=%s",
+                        novel_id, chapter_number, draft.fusion_id
                     )
 
-                if beat_sheet is None or not getattr(beat_sheet, "scenes", None):
-                    raise ValueError("Beat sheet not found")
-
-                beat_ids = [f"{chapter.id}-beat-{index + 1}" for index, _ in enumerate(beat_sheet.scenes)]
-                target_words = self._resolve_target_words(novel_id)
-                suspense_budget = {"primary": 0, "secondary": 0}
-                state_lock_version = int(result.get("state_lock_version") or getattr(beat_sheet, "state_lock_version", 0) or 0)
-                if state_lock_version <= 0:
-                    raise ValueError("State lock version is required before fusion")
-
-                job = self._chapter_fusion_service.create_job(
-                    chapter_id=chapter.id,
-                    plan_version=int(result.get("plan_version") or getattr(beat_sheet, "plan_version", 0) or 0),
-                    state_lock_version=state_lock_version,
-                    beat_ids=beat_ids,
-                    target_words=target_words,
-                    suspense_budget=suspense_budget,
-                )
-                job = await self._chapter_fusion_service.run_job(job.fusion_job_id)
-                draft = getattr(job, "fusion_draft", None)
-                if draft is None:
-                    raise ValueError("Fusion draft was not created")
-
-                result["fusion_id"] = draft.fusion_id
-                result["fusion_job_id"] = job.fusion_job_id
-                result["fusion_status"] = job.status
-
+                # 执行验证（full 和 retry 模式都需要）
                 validation_service = getattr(self._chapter_fusion_service, "validation_service", None)
                 if validation_service is not None:
                     report_id = getattr(draft, "latest_validation_report_id", "") or ""
                     report = None
-                    if report_id:
+                    if report_id and skip_fusion:
+                        # retry 模式：复用现有的验证报告
                         report = validation_service.get_report(report_id)
                     else:
+                        # full 模式或 retry 模式无现有报告：重新验证
                         report = await validation_service.auto_validate_fusion_draft(chapter.id, draft.fusion_id)
                         report_id = report.report_id
                     result["validation_report_id"] = report_id

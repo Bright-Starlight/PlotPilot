@@ -24,6 +24,19 @@ router = APIRouter(prefix="/novels", tags=["novels"])
 
 
 # Request Models
+class StructurePreference(BaseModel):
+    """结构偏好配置"""
+    parts: int = Field(default=1, ge=1, le=10, description="部数")
+    volumes_per_part: int = Field(default=1, ge=1, le=10, description="每部卷数")
+    acts_per_volume: int = Field(default=4, ge=1, le=10, description="每卷幕数")
+
+
+class PlanningConfig(BaseModel):
+    """规划配置"""
+    plan_mode: str = Field(default="quick", description="规划模式：quick（快速生成）或 precise（精密定制）")
+    structure: Optional[StructurePreference] = Field(default=None, description="结构偏好（仅 precise 模式需要）")
+
+
 class CreateNovelRequest(BaseModel):
     """创建小说请求"""
     novel_id: str = Field(..., description="小说 ID")
@@ -33,6 +46,8 @@ class CreateNovelRequest(BaseModel):
     target_words_per_chapter: int = Field(default=AppConfig.DEFAULT_WORDS_PER_CHAPTER, gt=0, description="每章目标字数")
     premise: str = Field(default="", description="故事梗概/创意")
     genre: str = Field(default="", description="题材类型（可选，如 xuanhuan/suspense/romance）")
+    sub_genres: Optional[List[str]] = Field(default=None, description="子题材类型列表（可选）")
+    planning_config: Optional[PlanningConfig] = Field(default=None, description="规划配置（可选）")
 
 
 class UpdateStageRequest(BaseModel):
@@ -48,6 +63,7 @@ class UpdateNovelRequest(BaseModel):
     target_words_per_chapter: int = Field(None, gt=0, description="每章目标字数")
     premise: str = Field(None, description="故事梗概/创意")
     genre: str = Field(None, description="题材类型（可选）")
+    sub_genres: Optional[List[str]] = Field(None, description="子题材类型列表（可选）")
 
 
 class UpdateAutoApproveRequest(BaseModel):
@@ -139,6 +155,14 @@ async def create_novel(
     Returns:
         创建的小说 DTO
     """
+    # 转换 planning_config 为字典
+    planning_config_dict = None
+    if request.planning_config:
+        planning_config_dict = {
+            "plan_mode": request.planning_config.plan_mode,
+            "structure": request.planning_config.structure.dict() if request.planning_config.structure else None,
+        }
+
     # 只创建小说实体，不生成 Bible
     novel_dto = service.create_novel(
         novel_id=request.novel_id,
@@ -148,6 +172,8 @@ async def create_novel(
         target_words_per_chapter=request.target_words_per_chapter,
         premise=request.premise,
         genre=request.genre,
+        sub_genres=request.sub_genres,
+        planning_config=planning_config_dict,
     )
 
     return novel_dto
@@ -217,6 +243,7 @@ async def update_novel(
             request.premise,
             request.genre,
             request.target_words_per_chapter,
+            request.sub_genres,
         )
     except EntityNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

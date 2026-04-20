@@ -409,14 +409,64 @@ class AutopilotDaemon:
         if not self._is_still_running(novel):
             return
 
+        # 检查是否已有幕节点（手动规划或之前已完成宏观规划）
+        novel_id = novel.novel_id.value
+        all_nodes = await self.story_node_repo.get_by_novel(novel_id)
+        act_nodes = [n for n in all_nodes if n.node_type.value == "act"]
+
+        if act_nodes:
+            logger.info(
+                f"[{novel.novel_id}] 已有 {len(act_nodes)} 个幕节点（手动规划或已完成宏观规划），"
+                f"跳过宏观规划，直接进入幕级规划"
+            )
+            # 全自动模式：直接进入幕级规划
+            if getattr(novel, 'auto_approve_mode', False):
+                novel.current_stage = NovelStage.ACT_PLANNING
+                self._flush_novel(novel)
+                logger.info(f"[{novel.novel_id}] 🚀 全自动模式：跳过宏观规划，直接进入幕级规划")
+            else:
+                # 非全自动模式：进入审阅等待（让用户确认已有的结构）
+                novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+                self._flush_novel(novel)
+                logger.info(f"[{novel.novel_id}] 已有结构规划，进入审阅等待")
+            return
+
         target_chapters = novel.target_chapters or 30
 
-        # 使用极速模式：structure_preference=None，让 AI 根据目标章节数智能决定结构
-        # 这样 30 章、100 章、300 章、500 章会自动生成不同规模的叙事骨架
+        # 根据 planning_config 决定使用哪种模式
+        structure_preference = None
+        if hasattr(novel, 'planning_config') and novel.planning_config:
+            config = novel.planning_config
+            # 如果是精密定制模式，使用用户配置的结构
+            if getattr(config, 'plan_mode', 'quick') == 'precise':
+                # 优先从 structure 字段读取（前端传入的格式），否则读顶层属性
+                structure_data = getattr(config, 'structure', None)
+                if structure_data and isinstance(structure_data, dict):
+                    parts = structure_data.get('parts', 1)
+                    volumes_per_part = structure_data.get('volumes_per_part', 1)
+                    acts_per_volume = structure_data.get('acts_per_volume', 4)
+                else:
+                    parts = getattr(config, 'parts', 1)
+                    volumes_per_part = getattr(config, 'volumes_per_part', 1)
+                    acts_per_volume = getattr(config, 'acts_per_volume', 4)
+                structure_preference = {
+                    'parts': parts,
+                    'volumes_per_part': volumes_per_part,
+                    'acts_per_volume': acts_per_volume,
+                }
+                logger.info(
+                    f"[{novel.novel_id}] 使用精密定制模式：{structure_preference['parts']}部 × "
+                    f"{structure_preference['volumes_per_part']}卷 × {structure_preference['acts_per_volume']}幕"
+                )
+            else:
+                logger.info(f"[{novel.novel_id}] 使用快速生成模式：AI 自主决定最优结构")
+        else:
+            logger.info(f"[{novel.novel_id}] 无 planning_config，使用快速生成模式")
+
         result = await self.planning_service.generate_macro_plan(
             novel_id=novel.novel_id.value,
             target_chapters=target_chapters,
-            structure_preference=None  # 极速模式：AI 自主决定最优结构
+            structure_preference=structure_preference
         )
 
         if not self._is_still_running(novel):
@@ -426,6 +476,8 @@ class AutopilotDaemon:
         struct = result.get("structure") if isinstance(result, dict) else None
         # 注意：structure 为 [] 时不能写 `if result.get("structure")`，否则会被当成失败分支且不落库
         if result.get("success") and isinstance(struct, list) and len(struct) > 0:
+            # 根据 planning_config 计算并添加 suggested_chapter_count
+            struct = self._add_suggested_chapter_count(novel, struct)
             await self._confirm_macro_structure(novel, struct)
         else:
             logger.warning(
@@ -492,6 +544,54 @@ class AutopilotDaemon:
         logger.warning(f"[{novel.novel_id}] 使用最小占位宏观结构（{len(structure[0]['volumes'][0]['acts'])} 幕）")
         await self._confirm_macro_structure(novel, structure)
 
+    def _add_suggested_chapter_count(self, novel: Novel, structure: List[Dict]) -> List[Dict]:
+        """根据 planning_config 计算每幕建议章节数，添加到结构数据中。
+
+        优先级：
+        1. LLM 返回的 estimated_chapters（精密规划时 LLM 已经分配好了）
+        2. planning_config.chapters_per_act（精密定制模式用户显式指定）
+        3. target_chapters / 总幕数（自动均分）
+        """
+        # 优先使用用户显式指定的每幕章节数
+        if hasattr(novel, 'planning_config') and novel.planning_config:
+            chapters_per_act = getattr(novel.planning_config, 'chapters_per_act', None)
+            if chapters_per_act and chapters_per_act > 0:
+                logger.info(f"[{novel.novel_id}] 使用 planning_config.chapters_per_act={chapters_per_act}")
+                for part in structure:
+                    for volume in part.get("volumes", []):
+                        for act in volume.get("acts", []):
+                            # 如果 LLM 已经返回了 estimated_chapters，优先使用它
+                            if not act.get("estimated_chapters") or act.get("estimated_chapters") <= 0:
+                                act["suggested_chapter_count"] = chapters_per_act
+                            else:
+                                act["suggested_chapter_count"] = act["estimated_chapters"]
+                return structure
+
+        # 否则自动均分
+        target_chapters = getattr(novel, 'target_chapters', None) or 30
+        total_acts = 0
+        for part in structure:
+            for volume in part.get("volumes", []):
+                total_acts += len(volume.get("acts", []))
+
+        if total_acts <= 0:
+            logger.warning(f"[{novel.novel_id}] 结构中没有找到任何幕，跳过 suggested_chapter_count 计算")
+            return structure
+
+        per_act = max(target_chapters // total_acts, 1)
+        logger.info(f"[{novel.novel_id}] 自动均分章节：{target_chapters} 章 / {total_acts} 幕 ≈ {per_act} 章/幕")
+
+        for part in structure:
+            for volume in part.get("volumes", []):
+                for act in volume.get("acts", []):
+                    # 如果 LLM 已经返回了 estimated_chapters，优先使用它
+                    if not act.get("estimated_chapters") or act.get("estimated_chapters") <= 0:
+                        act["suggested_chapter_count"] = per_act
+                    else:
+                        act["suggested_chapter_count"] = act["estimated_chapters"]
+
+        return structure
+
     def _fallback_act_chapters_plan(self, act_node, count: int) -> List[Dict[str, Any]]:
         """LLM 幕级规划失败或 chapters 为空时，生成可落库的占位章节（避免抛错导致连续失败计数）。"""
         n = max(int(count or 5), 1)
@@ -507,6 +607,176 @@ class AutopilotDaemon:
                 ),
             })
         return rows
+
+    def _get_expected_chapter_count(self, novel: Novel, act_node) -> int:
+        """获取期望的章节数量（优先级：act配置 > novel全局配置 > 默认值）"""
+        # 优先级1：幕节点自己的配置
+        if act_node.suggested_chapter_count and act_node.suggested_chapter_count > 0:
+            return act_node.suggested_chapter_count
+
+        # 优先级2：小说全局配置
+        if hasattr(novel, 'planning_config') and novel.planning_config:
+            return novel.planning_config.chapters_per_act
+
+        # 优先级3：默认值
+        return 5
+
+    async def _supplement_act_chapters(
+        self,
+        novel: Novel,
+        target_act,
+        existing_chapters: List,
+        shortage_count: int
+    ) -> None:
+        """补齐幕的章节规划
+
+        Args:
+            novel: 小说实体
+            target_act: 目标幕节点
+            existing_chapters: 已有章节列表
+            shortage_count: 缺少的章节数量
+        """
+        logger.info(
+            f"[{novel.novel_id}] 开始补齐幕 {target_act.number} 的章节规划，"
+            f"需要补充 {shortage_count} 章"
+        )
+
+        # 1. 获取最后一章的信息作为续写起点
+        existing_chapters.sort(key=lambda c: c.number)
+        last_chapter = existing_chapters[-1]
+        last_chapter_summary = (
+            getattr(last_chapter, 'outline', None) or
+            getattr(last_chapter, 'description', None) or
+            last_chapter.title or
+            "无"
+        )
+
+        # 2. 获取上下文
+        from application.blueprint.services.continuous_planning_service import ContinuousPlanningService
+        bible_context = {}
+        if hasattr(self.planning_service, '_get_bible_context'):
+            try:
+                bible_context = self.planning_service._get_bible_context(novel.novel_id.value)
+            except Exception as e:
+                logger.warning(f"[{novel.novel_id}] 获取 Bible 上下文失败: {e}")
+
+        # 3. 构建补齐规划提示词
+        prompt = self._build_supplement_chapters_prompt(
+            act_node=target_act,
+            last_chapter_number=last_chapter.number,
+            last_chapter_summary=last_chapter_summary,
+            bible_context=bible_context,
+            shortage_count=shortage_count
+        )
+
+        # 4. 调用 LLM 生成补充章节
+        try:
+            from domain.ai.services.llm_service import GenerationConfig
+            response = await self.llm_service.generate(
+                prompt,
+                GenerationConfig(max_tokens=4096, temperature=0.7)
+            )
+
+            from application.ai.structured_json_pipeline import parse_and_repair_json
+            plan = parse_and_repair_json(
+                response.content if hasattr(response, 'content') else str(response)
+            )
+
+            supplement_chapters = plan.get("chapters", [])
+
+            if not supplement_chapters:
+                logger.warning(f"[{novel.novel_id}] 补齐规划未生成章节，使用占位章节")
+                supplement_chapters = self._fallback_supplement_chapters(
+                    target_act,
+                    last_chapter.number,
+                    shortage_count
+                )
+
+            # 5. 确认补充的章节规划（使用追加模式）
+            from application.blueprint.services.continuous_planning_service import PlanningMode
+            await self.planning_service.confirm_act_planning(
+                act_id=target_act.id,
+                chapters=supplement_chapters,
+                mode=PlanningMode.APPEND
+            )
+
+            logger.info(f"[{novel.novel_id}] 成功补齐 {len(supplement_chapters)} 章")
+
+        except Exception as e:
+            logger.error(f"[{novel.novel_id}] 补齐章节规划失败: {e}", exc_info=True)
+            # 降级：使用占位章节
+            fallback_chapters = self._fallback_supplement_chapters(
+                target_act,
+                last_chapter.number,
+                shortage_count
+            )
+            await self.planning_service.confirm_act_planning(
+                act_id=target_act.id,
+                chapters=fallback_chapters,
+                mode=PlanningMode.APPEND
+            )
+
+    def _build_supplement_chapters_prompt(
+        self,
+        act_node,
+        last_chapter_number: int,
+        last_chapter_summary: str,
+        bible_context: Dict,
+        shortage_count: int
+    ):
+        """构建补齐章节的提示词"""
+        from domain.ai.value_objects.prompt import Prompt
+
+        system_msg = """你是专业的小说章节规划助手。
+你的任务是基于已有章节的内容，补充后续章节的规划。
+必须确保：
+1. 延续已有章节的剧情逻辑
+2. 推进幕的整体目标
+3. 保持章节编号连续"""
+
+        user_msg = f"""幕信息：《{act_node.title}》
+幕描述：{act_node.description or '无'}
+
+最后一章（第 {last_chapter_number} 章）：
+{last_chapter_summary}
+
+可用人物：
+{chr(10).join(f"- {c.get('name', '未知')}" for c in bible_context.get('characters', [])[:10])}
+
+请补充后续 {shortage_count} 个章节（从第 {last_chapter_number + 1} 章开始）。
+
+输出 JSON 格式：
+{{
+  "chapters": [
+    {{
+      "number": {last_chapter_number + 1},
+      "title": "章节标题",
+      "description": "章节简介",
+      "outline": "章节大纲（100-200字）"
+    }}
+  ]
+}}"""
+
+        return Prompt(system=system_msg, user=user_msg)
+
+    def _fallback_supplement_chapters(
+        self,
+        act_node,
+        last_chapter_number: int,
+        shortage_count: int
+    ) -> List[Dict]:
+        """降级：生成占位补充章节"""
+        chapters = []
+        for i in range(shortage_count):
+            chapter_num = last_chapter_number + i + 1
+            chapters.append({
+                "number": chapter_num,
+                "title": f"第 {chapter_num} 章（待规划）",
+                "description": f"继续推进《{act_node.title}》的剧情",
+                "outline": f"本章将继续发展幕的核心冲突和目标"
+            })
+        return chapters
+
 
     async def _handle_act_planning(self, novel: Novel):
         """处理幕级规划（插入缓冲章策略 + 动态幕生成）"""
@@ -582,18 +852,60 @@ class AutopilotDaemon:
                 novel.current_stage = NovelStage.WRITING
                 return
 
-        # 检查该幕下是否已有章节节点（避免重复规划）
+        # 1. 获取全局配置的章节数量
+        expected_chapter_count = self._get_expected_chapter_count(novel, target_act)
+
+        # 2. 检查该幕下已有章节数量
         act_children = self.story_node_repo.get_children_sync(target_act.id)
         confirmed_chapters = [n for n in act_children if n.node_type.value == "chapter"]
+        current_count = len(confirmed_chapters)
+
+        logger.info(
+            f"[{novel.novel_id}] 幕 {target_act_number} 章节数量检查: "
+            f"已有 {current_count} 章, 期望 {expected_chapter_count} 章"
+        )
 
         just_created_chapter_plan = False
-        if not confirmed_chapters:
-            chapter_budget = target_act.suggested_chapter_count or 5
+
+        # 3. 根据数量判断操作
+        if current_count >= expected_chapter_count:
+            # 数量充足或超出，直接进入写作阶段
+            logger.info(
+                f"[{novel.novel_id}] 幕 {target_act_number} 章节数量充足 "
+                f"({current_count} >= {expected_chapter_count})，直接进入写作阶段"
+            )
+            # 不需要规划，直接跳到后续的写作阶段设置
+
+        elif current_count > 0:
+            # 数量不足，需要补齐
+            shortage = expected_chapter_count - current_count
+            logger.info(
+                f"[{novel.novel_id}] 幕 {target_act_number} 章节数量不足，"
+                f"需要补齐 {shortage} 章"
+            )
+
+            # 调用补齐规划
+            await self._supplement_act_chapters(
+                novel=novel,
+                target_act=target_act,
+                existing_chapters=confirmed_chapters,
+                shortage_count=shortage
+            )
+            just_created_chapter_plan = True
+
+            # 重新加载章节列表
+            act_children = self.story_node_repo.get_children_sync(target_act.id)
+            confirmed_chapters = [n for n in act_children if n.node_type.value == "chapter"]
+
+        else:
+            # 无章节，执行完整规划
+            logger.info(f"[{novel.novel_id}] 幕 {target_act_number} 无规划，开始自动规划")
+
             plan_result: Dict[str, Any] = {}
             try:
                 plan_result = await self.planning_service.plan_act_chapters(
                     act_id=target_act.id,
-                    custom_chapter_count=chapter_budget
+                    custom_chapter_count=expected_chapter_count
                 )
             except Exception as e:
                 logger.warning(
@@ -612,16 +924,19 @@ class AutopilotDaemon:
                 logger.warning(
                     f"[{novel.novel_id}] 幕 {target_act_number} 未得到有效章节规划，使用占位章节落库"
                 )
-                chapters_data = self._fallback_act_chapters_plan(target_act, chapter_budget)
+                chapters_data = self._fallback_act_chapters_plan(target_act, expected_chapter_count)
 
+            from application.blueprint.services.continuous_planning_service import PlanningMode
             await self.planning_service.confirm_act_planning(
                 act_id=target_act.id,
-                chapters=chapters_data
+                chapters=chapters_data,
+                mode=PlanningMode.SKIP_IF_EXISTS
             )
             just_created_chapter_plan = True
 
-        act_children = self.story_node_repo.get_children_sync(target_act.id)
-        confirmed_chapters = [n for n in act_children if n.node_type.value == "chapter"]
+            # 重新加载章节列表
+            act_children = self.story_node_repo.get_children_sync(target_act.id)
+            confirmed_chapters = [n for n in act_children if n.node_type.value == "chapter"]
 
         # current_act 为 0-based 幕索引（与 Novel 实体一致），勿写入 1-based 的 target_act_number
         novel.current_act = target_act_number - 1
@@ -846,14 +1161,17 @@ class AutopilotDaemon:
                     }
                 )
 
-                if final_quality.passed and beat_content.strip():
-                    consecutive_failed_beats = 0
+                # 无论质量是否通过，只要有内容就保留并拼接
+                if beat_content.strip():
                     chapter_content += ("\n\n" if chapter_content else "") + beat_content
                     await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="draft")
+
+                if final_quality.passed:
+                    consecutive_failed_beats = 0
                 else:
                     consecutive_failed_beats += 1
                     logger.warning(
-                        "[%s] 节拍 %s/%s 质量未达标，跳过拼接: reasons=%s chars=%s",
+                        "[%s] 节拍 %s/%s 质量未达标但仍保留内容: reasons=%s chars=%s",
                         novel.novel_id,
                         i + 1,
                         len(beats),
@@ -1695,33 +2013,20 @@ class AutopilotDaemon:
 
                 quality_gate_passed = bool(drift_result.get("quality_gate_passed", True))
 
-                # 如果门禁失败，重试
+                # 如果门禁失败，直接停止（不再重试）
                 if not quality_gate_passed:
                     logger.warning(
-                        f"[{novel.novel_id}] 章节 {chapter_num} 审计门禁未通过，开始重试（跳过 State Locks）"
+                        f"[{novel.novel_id}] 章节 {chapter_num} 审计门禁未通过，退出自动驾驶"
                     )
-                    retry_result = await self.aftermath_pipeline._run_quality_gate(
-                        novel.novel_id.value,
-                        chapter_num,
-                        content,
-                        quality_gate_mode="retry",
-                    )
-                    drift_result.update(retry_result)
-                    quality_gate_passed = bool(retry_result.get("quality_gate_passed", True))
-
-                    if not quality_gate_passed:
-                        logger.warning(
-                            f"[{novel.novel_id}] 章节 {chapter_num} 审计重试仍未通过，退出自动驾驶"
-                        )
-                        novel.last_audit_chapter_number = chapter_num
-                        novel.last_audit_similarity = drift_result.get("similarity_score")
-                        novel.last_audit_drift_alert = bool(drift_result.get("drift_alert", False))
-                        novel.last_audit_narrative_ok = False  # 门禁失败，未执行信息同步
-                        novel.last_audit_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-                        novel.autopilot_status = AutopilotStatus.STOPPED
-                        novel.current_stage = NovelStage.AUDITING
-                        self.novel_repository.save(novel)  # 直接保存，避免 _save_novel_state 覆盖状态
-                        return
+                    novel.last_audit_chapter_number = chapter_num
+                    novel.last_audit_similarity = drift_result.get("similarity_score")
+                    novel.last_audit_drift_alert = bool(drift_result.get("drift_alert", False))
+                    novel.last_audit_narrative_ok = False  # 门禁失败，未执行信息同步
+                    novel.last_audit_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                    novel.autopilot_status = AutopilotStatus.STOPPED
+                    novel.current_stage = NovelStage.AUDITING
+                    self.novel_repository.save(novel)  # 直接保存，避免 _save_novel_state 覆盖状态
+                    return
 
                 # 门禁通过后，执行完整信息同步（使用融合草稿）
                 logger.info(

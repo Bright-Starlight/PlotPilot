@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS novels (
     last_audit_issues TEXT,
     target_words_per_chapter INTEGER DEFAULT 3500,
     genre TEXT DEFAULT '',
+    sub_genres TEXT DEFAULT '[]',
     theme_agent_enabled INTEGER NOT NULL DEFAULT 0,
     enabled_theme_skills TEXT DEFAULT '[]',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

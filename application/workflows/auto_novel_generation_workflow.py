@@ -369,13 +369,16 @@ class AutoNovelGenerationWorkflow:
                         best_content = candidate
                         break
                 final_quality = assess_beat_content(best_content, beat.target_words)
-                if final_quality.passed and best_content.strip():
-                    consecutive_failed_beats = 0
+                # 无论质量是否通过，只要有内容就保留并拼接
+                if best_content.strip():
                     content_parts.append(best_content)
+
+                if final_quality.passed:
+                    consecutive_failed_beats = 0
                 else:
                     consecutive_failed_beats += 1
                     logger.warning(
-                        "节拍 %s/%s 质量未达标，跳过拼接: reasons=%s chars=%s",
+                        "节拍 %s/%s 质量未达标但仍保留内容: reasons=%s chars=%s",
                         i + 1,
                         len(beats),
                         list(final_quality.failure_reasons),

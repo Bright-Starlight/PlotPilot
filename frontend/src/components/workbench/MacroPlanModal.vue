@@ -8,7 +8,11 @@
     title="🎯 启动结构规划"
   >
     <template #header-extra>
-      <n-text depth="3" style="font-size: 12px">选择规划模式，AI 生成叙事骨架</n-text>
+      <n-space v-if="novelInfo" vertical :size="4" style="text-align: right">
+        <n-text depth="3" style="font-size: 12px">{{ genreLabel }}</n-text>
+        <n-text v-if="subGenresLabel" depth="3" style="font-size: 11px">{{ subGenresLabel }}</n-text>
+      </n-space>
+      <n-text v-else depth="3" style="font-size: 12px">选择规划模式，AI 生成叙事骨架</n-text>
     </template>
 
     <!-- 模式选择选项卡 -->
@@ -175,7 +179,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import {
   planningApi,
@@ -184,6 +188,7 @@ import {
   type MacroPlanResultPayload,
 } from '../../api/planning'
 import { workflowApi } from '../../api/workflow'
+import { novelApi } from '../../api/novel'
 
 const props = defineProps<{ show: boolean; novelId: string }>()
 const emit = defineEmits<{
@@ -197,6 +202,45 @@ const show = computed({
 })
 
 const message = useMessage()
+
+const novelInfo = ref<{ genre: string; sub_genres: string[] } | null>(null)
+
+watch(() => props.show, async (val) => {
+  if (val) {
+    try {
+      const novel = await novelApi.getNovel(props.novelId)
+      novelInfo.value = { genre: novel.genre || '', sub_genres: novel.sub_genres || [] }
+    } catch {
+      novelInfo.value = null
+    }
+  }
+}, { immediate: true })
+
+const genreLabel = computed(() => {
+  if (!novelInfo.value?.genre) return ''
+  const map: Record<string, string> = {
+    xuanhuan: '玄幻', dushi: '都市', scifi: '科幻', history: '历史',
+    wuxia: '武侠', xianxia: '仙侠', fantasy: '奇幻', game: '游戏',
+    suspense: '悬疑', romance: '言情', other: '其他',
+  }
+  return map[novelInfo.value.genre] || novelInfo.value.genre
+})
+
+const allSubGenreLabels: Record<string, string> = {
+  // history
+  chaotang: '朝堂权谋', hougong: '后宫', zhichang: '职场',
+  qingsong: '轻松', chuanyue: '穿越', wuxia: '武侠',
+  // xuanhuan
+  xiulian: '修炼升级流', fanren: '凡人流', xitong: '系统流',
+  wudi: '无敌流', wuxian: '无限流',
+}
+
+const subGenresLabel = computed(() => {
+  if (!novelInfo.value?.sub_genres?.length) return ''
+  return novelInfo.value.sub_genres
+    .map(v => allSubGenreLabels[v] || v)
+    .join('、')
+})
 
 const planMode = ref<'quick' | 'precise'>('quick')
 
@@ -282,6 +326,29 @@ const flattenStructure = (parts: MacroPartNode[]) => {
   }
 
   return result
+}
+
+const addSuggestedChapterCount = (parts: MacroPartNode[]): MacroPartNode[] => {
+  // 计算每幕建议章节数
+  const suggestedCount = chaptersPerAct.value
+
+  // 深拷贝并为每个幕添加 suggested_chapter_count
+  return parts.map(part => {
+    const newPart = { ...part }
+    if (Array.isArray(newPart.volumes)) {
+      newPart.volumes = newPart.volumes.map(volume => {
+        const newVolume = { ...volume }
+        if (Array.isArray(newVolume.acts)) {
+          newVolume.acts = newVolume.acts.map(act => ({
+            ...act,
+            suggested_chapter_count: suggestedCount
+          }))
+        }
+        return newVolume
+      })
+    }
+    return newPart
+  })
 }
 
 const stopProgressPolling = () => {
@@ -396,7 +463,10 @@ const doGenerate = async () => {
 const doConfirm = async () => {
   confirming.value = true
   try {
-    const res = await planningApi.confirmMacro(props.novelId, { structure: editableStructure.value as Record<string, unknown>[] }) as any
+    // 为每个幕节点添加 suggested_chapter_count
+    const structureWithChapterCount = addSuggestedChapterCount(editableStructure.value)
+
+    const res = await planningApi.confirmMacro(props.novelId, { structure: structureWithChapterCount as Record<string, unknown>[] }) as any
 
     // 解析后端返回的 summary 状态
     const summary = res?.summary || {}

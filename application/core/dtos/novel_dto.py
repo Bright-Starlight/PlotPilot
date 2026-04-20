@@ -82,6 +82,7 @@ class NovelDTO:
     autopilot_status: str = "stopped"
     auto_approve_mode: bool = False
     genre: str = ""
+    sub_genres: List[str] = field(default_factory=list)
     theme_agent_enabled: bool = False
     enabled_theme_skills: List[str] = field(default_factory=list)
 
@@ -113,6 +114,7 @@ class NovelDTO:
             autopilot_status=autopilot_status,
             auto_approve_mode=getattr(novel, 'auto_approve_mode', False),
             genre=getattr(novel, 'genre', ''),
+            sub_genres=getattr(novel, 'sub_genres', []) or [],
             theme_agent_enabled=getattr(novel, 'theme_agent_enabled', False),
             enabled_theme_skills=getattr(novel, 'enabled_theme_skills', []) or [],
         )

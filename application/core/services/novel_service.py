@@ -1,6 +1,7 @@
 """Novel 应用服务"""
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
+import logging
 from domain.novel.entities.novel import Novel, NovelStage
 from domain.novel.entities.chapter import Chapter
 from domain.novel.value_objects.novel_id import NovelId
@@ -13,6 +14,10 @@ from application.core.dtos.novel_dto import NovelDTO
 from domain.structure.story_node import StoryNode, NodeType, PlanningStatus, PlanningSource
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.database.sqlite_chapter_generation_metrics_repository import SqliteChapterGenerationMetricsRepository
+from domain.ai.services.llm_service import LLMService, GenerationConfig
+from domain.ai.value_objects.prompt import Prompt
+
+logger = logging.getLogger(__name__)
 
 
 class NovelService:
@@ -85,6 +90,8 @@ class NovelService:
         target_words_per_chapter: int = AppConfig.DEFAULT_WORDS_PER_CHAPTER,
         premise: str = "",
         genre: str = "",
+        sub_genres: Optional[List[str]] = None,
+        planning_config: Optional[Dict[str, Any]] = None,
     ) -> NovelDTO:
         """创建新小说
 
@@ -95,10 +102,26 @@ class NovelService:
             target_chapters: 目标章节数
             premise: 故事梗概/创意
             genre: 题材类型（可选）
+            sub_genres: 子题材类型列表（可选）
+            planning_config: 规划配置（可选）
 
         Returns:
             NovelDTO
         """
+        from domain.novel.entities.novel import PlanningConfig
+
+        # 构建 PlanningConfig
+        config = None
+        if planning_config:
+            plan_mode = planning_config.get("plan_mode", "quick")
+            structure = planning_config.get("structure", {})
+            config = PlanningConfig(
+                plan_mode=plan_mode,
+                parts=structure.get("parts", 1) if structure else 1,
+                volumes_per_part=structure.get("volumes_per_part", 1) if structure else 1,
+                acts_per_volume=structure.get("acts_per_volume", 4) if structure else 4,
+            )
+
         novel = Novel(
             id=NovelId(novel_id),
             title=title,
@@ -108,6 +131,8 @@ class NovelService:
             premise=premise,
             stage=NovelStage.PLANNING,
             genre=genre,
+            sub_genres=sub_genres,
+            planning_config=config,
         )
 
         self.novel_repository.save(novel)
@@ -276,7 +301,8 @@ class NovelService:
     def update_novel(self, novel_id: str, title: Optional[str] = None, author: Optional[str] = None,
                      target_chapters: Optional[int] = None, premise: Optional[str] = None,
                      genre: Optional[str] = None,
-                     target_words_per_chapter: Optional[int] = None) -> NovelDTO:
+                     target_words_per_chapter: Optional[int] = None,
+                     sub_genres: Optional[List[str]] = None) -> NovelDTO:
         """更新小说基本信息
 
         Args:
@@ -286,6 +312,8 @@ class NovelService:
             target_chapters: 目标章节数（可选）
             premise: 故事梗概/创意（可选）
             genre: 题材类型（可选）
+            target_words_per_chapter: 每章目标字数（可选）
+            sub_genres: 子题材类型列表（可选）
 
         Returns:
             更新后的 NovelDTO
@@ -310,6 +338,8 @@ class NovelService:
             novel.genre = genre
         if target_words_per_chapter is not None:
             novel.target_words_per_chapter = target_words_per_chapter
+        if sub_genres is not None:
+            novel.sub_genres = sub_genres
 
         self.novel_repository.save(novel)
         return NovelDTO.from_domain(self._hydrate_chapters(novel))
