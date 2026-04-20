@@ -248,13 +248,21 @@ class ContinuousPlanningService:
         # 获取 Bible 信息
         bible_context = self._get_bible_context(novel_id)
 
+        # 获取小说题材
+        genre = ""
+        if self.novel_repository:
+            novel = self.novel_repository.get_by_id(NovelId(novel_id))
+            if novel:
+                genre = novel.genre
+
         try:
             if structure_preference is None:
                 # 构建提示词
                 prompt = self._build_macro_planning_prompt(
                     bible_context=bible_context,
                     target_chapters=target_chapters,
-                    structure_preference=structure_preference
+                    structure_preference=structure_preference,
+                    genre=genre,
                 )
 
                 # 调用 LLM 生成规划
@@ -267,6 +275,7 @@ class ContinuousPlanningService:
                     bible_context=bible_context,
                     target_chapters=target_chapters,
                     structure_preference=structure_preference,
+                    genre=genre,
                 )
 
             # 评估规划质量
@@ -306,7 +315,8 @@ class ContinuousPlanningService:
         novel_id: str,
         bible_context: Dict,
         target_chapters: int,
-        structure_preference: Dict[str, int]
+        structure_preference: Dict[str, int],
+        genre: str = "",
     ) -> Dict:
         """精密模式：系统先搭固定骨架，整版生成后再定向补全缺失字段。"""
         skeleton = self._build_precise_structure_skeleton(target_chapters, structure_preference)
@@ -324,6 +334,7 @@ class ContinuousPlanningService:
             target_chapters=target_chapters,
             structure_preference=structure_preference,
             skeleton=skeleton,
+            genre=genre,
         )
         config = GenerationConfig(
             max_tokens=self._calculate_precise_max_tokens(structure_preference),
@@ -1376,13 +1387,150 @@ class ContinuousPlanningService:
             logger.error("Planning raw content (last 500 chars): %s", cleaned[-500:])
             raise
 
-    def _calculate_chapter_distribution(self, total_chapters: int, parts: int) -> Dict[str, List[int]]:
-        """计算黄金比例的章数分配
+    def _get_distribution_for_genre(self, genre: str) -> str:
+        """Route genre string to distribution type."""
+        genre_lower = genre.lower()
+        if "xuanhuan" in genre_lower or "玄幻" in genre_lower:
+            return "xuanhuan"
+        elif "history" in genre_lower or "历史" in genre_lower:
+            return "historical"
+        else:
+            return "default"
 
-        核心算法：
-        - 3部：25% - 50% - 25% (起源-深渊-决战)
-        - 4部：20% - 30% - 30% - 20% (双峰中段)
-        - 5部+：首尾各20%，中间平分剩余60%
+    def _get_genre_part_label(self, genre: str, part_index: int, total_parts: int) -> str:
+        """Return genre-specific part label for pacing_guide.
+
+        玄幻: 起源卷/觉醒卷/筑基卷 → 崛起卷/风云卷/乱世卷 → 巅峰卷/飞升卷/终章卷
+        历史: 崛起篇/奠基篇/初锋篇 → 争锋篇/博弈篇/权倾篇/烽火篇 → 终焉篇/大一统篇/新朝篇
+        default: 起源/发展/深渊/决战 (generic)
+        """
+        genre_type = self._get_distribution_for_genre(genre)
+        is_first = part_index == 1
+        is_last = part_index == total_parts
+        middle_count = total_parts - 2
+
+        if genre_type == "xuanhuan":
+            if is_first:
+                labels = ["起源卷", "觉醒卷", "筑基卷"]
+                return labels[min(part_index - 1, len(labels) - 1)]
+            elif is_last:
+                labels = ["巅峰卷", "飞升卷", "终章卷"]
+                return labels[min(part_index - 1, len(labels) - 1)]
+            else:
+                idx = (part_index - 2) % 3
+                labels = ["崛起卷", "风云卷", "乱世卷"]
+                return labels[idx]
+        elif genre_type == "historical":
+            if is_first:
+                labels = ["崛起篇", "奠基篇", "初锋篇"]
+                return labels[min(part_index - 1, len(labels) - 1)]
+            elif is_last:
+                labels = ["终焉篇", "大一统篇", "新朝篇"]
+                return labels[min(part_index - 1, len(labels) - 1)]
+            else:
+                idx = (part_index - 2) % 4
+                labels = ["争锋篇", "博弈篇", "权倾篇", "烽火篇"]
+                return labels[idx]
+        else:
+            # Default generic labels
+            if is_first:
+                return "起源"
+            elif is_last:
+                return "决战"
+            else:
+                return "发展/深渊"
+
+    def _xuanhuan_distribution(self, total_chapters: int, parts: int) -> Dict[str, List[int]]:
+        """倒V形比例（境界递进）：境界越高体量越大
+
+        - 5部: 10% - 20% - 25% - 20% - 15%
+        - 4部: 12% - 24% - 28% - 24% - 12%
+        - 3部: 15% - 35% - 30% - 20%
+        """
+        if parts == 1:
+            return {"part_chapters": [total_chapters], "part_ratios": [1.0]}
+        if parts == 2:
+            p1 = int(total_chapters * 0.35)
+            p2 = total_chapters - p1
+            return {"part_chapters": [p1, p2], "part_ratios": [0.35, 0.65]}
+        if parts == 3:
+            p1 = int(total_chapters * 0.15)
+            p3 = int(total_chapters * 0.20)
+            p2 = total_chapters - p1 - p3
+            return {"part_chapters": [p1, p2, p3], "part_ratios": [0.15, 0.65, 0.20]}
+        if parts == 4:
+            p1 = int(total_chapters * 0.12)
+            p4 = int(total_chapters * 0.12)
+            remaining = total_chapters - p1 - p4
+            p2 = int(remaining * 0.46)
+            p3 = remaining - p2
+            return {"part_chapters": [p1, p2, p3, p4], "part_ratios": [0.12, 0.46, 0.30, 0.12]}
+        # 5部+: 10/20/25/20/15
+        ratios = [0.10, 0.20, 0.25, 0.20, 0.15]
+        part_chapters = []
+        part_ratios = []
+        for i in range(parts):
+            if i < len(ratios):
+                r = ratios[i]
+            else:
+                r = 0.10 if i == 0 or i == parts - 1 else 0.20
+            ch = int(total_chapters * r)
+            part_chapters.append(ch)
+            part_ratios.append(r)
+        # last part absorbs remainder
+        part_chapters[-1] = total_chapters - sum(part_chapters[:-1])
+        part_ratios[-1] = part_chapters[-1] / total_chapters
+        return {"part_chapters": part_chapters, "part_ratios": part_ratios}
+
+    def _historical_distribution(self, total_chapters: int, parts: int) -> Dict[str, List[int]]:
+        """幂函数比例（政治周期）：中间部承担最多叙事重量
+
+        - 3部: 25% - 50% - 25%
+        - 4部: 20% - 30% - 30% - 20%
+        - 5部: 20% - 20% - 25% - 20% - 15% (中后部最重)
+        - 6部+: 递减，首尾各10%，中间各~16%
+        """
+        if parts == 1:
+            return {"part_chapters": [total_chapters], "part_ratios": [1.0]}
+        if parts == 2:
+            p1 = int(total_chapters * 0.35)
+            p2 = total_chapters - p1
+            return {"part_chapters": [p1, p2], "part_ratios": [0.35, 0.65]}
+        if parts == 3:
+            p1 = int(total_chapters * 0.25)
+            p3 = int(total_chapters * 0.25)
+            p2 = total_chapters - p1 - p3
+            return {"part_chapters": [p1, p2, p3], "part_ratios": [0.25, 0.50, 0.25]}
+        if parts == 4:
+            p1 = int(total_chapters * 0.20)
+            p4 = int(total_chapters * 0.20)
+            remaining = total_chapters - p1 - p4
+            p2 = remaining // 2
+            p3 = remaining - p2
+            return {"part_chapters": [p1, p2, p3, p4], "part_ratios": [0.20, 0.30, 0.30, 0.20]}
+        # 5部+: 首尾各20%，中间平分60%
+        first = int(total_chapters * 0.20)
+        last = int(total_chapters * 0.20)
+        middle_total = total_chapters - first - last
+        middle_parts = parts - 2
+        middle_each = middle_total // middle_parts
+        part_chapters = [first]
+        for i in range(middle_parts):
+            if i == middle_parts - 1:
+                part_chapters.append(middle_total - middle_each * (middle_parts - 1))
+            else:
+                part_chapters.append(middle_each)
+        part_chapters.append(last)
+        part_ratios = [c / total_chapters for c in part_chapters]
+        return {"part_chapters": part_chapters, "part_ratios": part_ratios}
+
+    def _calculate_chapter_distribution(self, total_chapters: int, parts: int, genre: str = "") -> Dict[str, List[int]]:
+        """计算章数分配，支持题材特定比例
+
+        Args:
+            total_chapters: 总章节数
+            parts: 部数
+            genre: 题材类型（xuanhuan/history/空或default）
 
         Returns:
             {
@@ -1390,51 +1538,46 @@ class ContinuousPlanningService:
                 "part_ratios": [0.25, 0.5, 0.25]   # 每部的占比
             }
         """
+        genre_type = self._get_distribution_for_genre(genre)
+        if genre_type == "xuanhuan":
+            return self._xuanhuan_distribution(total_chapters, parts)
+        elif genre_type == "historical":
+            return self._historical_distribution(total_chapters, parts)
+        # Default: 黄金分割
         if parts == 1:
             return {"part_chapters": [total_chapters], "part_ratios": [1.0]}
-
         if parts == 2:
-            # 双部结构：40% - 60% (铺垫-高潮)
             p1 = int(total_chapters * 0.4)
             p2 = total_chapters - p1
             return {"part_chapters": [p1, p2], "part_ratios": [0.4, 0.6]}
-
         if parts == 3:
-            # 经典三幕剧：25% - 50% - 25%
             p1 = int(total_chapters * 0.25)
             p3 = int(total_chapters * 0.25)
             p2 = total_chapters - p1 - p3
             return {"part_chapters": [p1, p2, p3], "part_ratios": [0.25, 0.5, 0.25]}
-
         if parts == 4:
-            # 双峰中段：20% - 30% - 30% - 20%
             p1 = int(total_chapters * 0.2)
             p4 = int(total_chapters * 0.2)
             remaining = total_chapters - p1 - p4
             p2 = remaining // 2
             p3 = remaining - p2
             return {"part_chapters": [p1, p2, p3, p4], "part_ratios": [0.2, 0.3, 0.3, 0.2]}
-
-        # 5部及以上：首尾各20%，中间平分60%
         first = int(total_chapters * 0.2)
         last = int(total_chapters * 0.2)
         middle_total = total_chapters - first - last
         middle_parts = parts - 2
         middle_each = middle_total // middle_parts
-
         part_chapters = [first]
         for i in range(middle_parts):
             if i == middle_parts - 1:
-                # 最后一个中间部分吃掉余数
                 part_chapters.append(middle_total - middle_each * (middle_parts - 1))
             else:
                 part_chapters.append(middle_each)
         part_chapters.append(last)
-
         part_ratios = [c / total_chapters for c in part_chapters]
         return {"part_chapters": part_chapters, "part_ratios": part_ratios}
 
-    def _build_quick_macro_prompt(self, bible_context: Dict, target_chapters: int) -> Prompt:
+    def _build_quick_macro_prompt(self, bible_context: Dict, target_chapters: int, genre: str = "") -> Prompt:
         """极速模式：破城槌提示词 V3（渐进式规划版）
 
         设计哲学：
@@ -1442,7 +1585,7 @@ class ContinuousPlanningService:
         - 中长篇（<500章）：可以规划完整的部/卷/幕结构
         - 避免单次 LLM 输出过多内容导致截断
         """
-        
+
         # 根据章节数决定规划深度
         if target_chapters > 500:
             planning_depth = "framework"  # 只规划部/卷框架
@@ -1471,11 +1614,48 @@ class ContinuousPlanningService:
 - 【强制要求】每幕必须输出 estimated_chapters（预估章数）
 - 【章数约束】所有幕的 estimated_chapters 之和必须等于 {target_chapters} 章
 """
-        
+
+        # 题材感知的商业节奏提示
+        genre_type = self._get_distribution_for_genre(genre)
+        if genre_type == "xuanhuan":
+            genre_pacing = """
+【题材节奏·玄幻】境界递进是核心驱动力：
+- 第1部（起源/觉醒）：主角刚踏入修行路，以小副本+退婚/打脸节奏建立爽感基础，章数偏少（10-15%）
+- 中间部（崛起/风云）：境界稳步提升，副本规模扩大，多方势力角逐，中段章节数最多（倒V形），每20-30章一个小高潮
+- 最后部（巅峰/飞升）：终极对决+飞升大战，节奏要快、爽感要密集、情绪爆发要强
+"""
+        elif genre_type == "historical":
+            genre_pacing = """
+【题材节奏·历史】政治博弈是核心驱动力：
+- 第1部（崛起/奠基）：主角政治资本积累，核心团队成形，权谋手段初现，章数偏少（20-25%）
+- 中间部（争锋/博弈）：政治博弈白热化，联盟背叛频发，大高潮集中在此段（40-50%总篇幅），多线叙事要铺开
+- 最后部（终焉/大一统）：新朝建立或终极权争终局，所有伏笔收束，终局要有史诗感
+"""
+        else:
+            genre_pacing = """
+【题材节奏·通用】经典叙事节奏：
+- 第1部：快速建立核心冲突和主角目标
+- 中间部：多线叙事推进，主角经历重大转变
+- 最后部：所有伏笔收束，终极对决，情绪爆发
+"""
+
         system_msg = f"""# 角色设定
 你是一位狂热且极具市场敏锐度的顶级网文主编，精通"退婚流"、"克苏鲁修仙"、"赛博朋克反乌托邦"等各种爆款商业节奏。你的任务是帮作者打破"白纸恐惧"，利用他给出的世界观设定，瞬间推演填补出一个完整、宏大、且充满极端冲突的长篇叙事骨架。
 
 {depth_instruction}
+
+# 叙事结构理论指导
+<STORY_THEORY>
+你设计的结构应符合以下经典叙事原理：
+1. 三幕剧结构：Setup（设定）→ Confrontation（对抗）→ Resolution（解决）
+2. 英雄之旅：平凡世界→冒险召唤→试炼→深渊→蜕变→归来
+3. 情绪曲线：开篇抓人→中段起伏（小高潮间隔3-5幕）→终局爆发
+4. 钩子密度：每部结尾必须有大悬念，每卷结尾有中等悬念，每幕结尾有小悬念
+</STORY_THEORY>
+
+{genre_pacing}
+
+# 核心推演铁律（The Icebreaker Rules V3）
 
 # 叙事结构理论指导
 <STORY_THEORY>
@@ -1627,6 +1807,7 @@ class ContinuousPlanningService:
         target_chapters: int,
         structure_preference: Dict,
         skeleton: Dict,
+        genre: str = "",
     ) -> Prompt:
         """精密模式：手术刀提示词 V2
 
@@ -1642,22 +1823,40 @@ class ContinuousPlanningService:
         acts_per_volume = structure_preference.get('acts_per_volume', 3)
         total_acts = parts * volumes_per_part * acts_per_volume
 
-        # 计算章数分配
-        distribution = self._calculate_chapter_distribution(target_chapters, parts)
+        # 计算章数分配（题材感知）
+        distribution = self._calculate_chapter_distribution(target_chapters, parts, genre)
         part_chapters = distribution["part_chapters"]
 
         # 计算每幕平均章数
         avg_chapters_per_act = target_chapters // total_acts if total_acts > 0 else 5
 
-        # 构建动态章节配额指示
+        # 构建题材感知的动态章节配额指示
+        genre_type = self._get_distribution_for_genre(genre)
         pacing_guide = "<PACING_GUIDE>\n"
         for i, chapters in enumerate(part_chapters, 1):
-            if i == 1:
-                pacing_guide += f"- 第{i}部（起源）：分配 {chapters} 章。情节要求：紧凑、抛出核心悬念、建立主角目标。\n"
-            elif i == parts:
-                pacing_guide += f"- 第{i}部（决战）：分配 {chapters} 章。情节要求：收束所有主线、终极对决、情绪爆发。\n"
+            label = self._get_genre_part_label(genre, i, parts)
+            if genre_type == "xuanhuan":
+                if i == 1:
+                    focus = "主角初入修行路、第一个小境界突破、核心势力初现。注意控制节奏，在50-80章内完成第一个大副本。"
+                elif i == parts:
+                    focus = "终极境界对决、飞升大战、所有伏笔收束。情绪爆发要强，结尾要爽。"
+                else:
+                    focus = "主角境界稳步提升，多方势力角逐。中段需有1-2个大型副本（每个50-80章），小高潮每20-30章一次。"
+            elif genre_type == "historical":
+                if i == 1:
+                    focus = "主角崛起初期、政治资本积累、核心团队成形。前期不要铺太大，控制在合理规模。"
+                elif i == parts:
+                    focus = "大一统终局、新朝建立、所有政治线收束。终局要宏大，体现政权更迭的史诗感。"
+                else:
+                    focus = "政治博弈白热化、联盟与背叛、势力重新洗牌。政争/战争的大高潮应集中在此段。"
             else:
-                pacing_guide += f"- 第{i}部（发展/深渊）：分配 {chapters} 章。情节要求：容量极大、多线叙事、主角重大转变。\n"
+                if i == 1:
+                    focus = "紧凑、抛出核心悬念、建立主角目标。"
+                elif i == parts:
+                    focus = "收束所有主线、终极对决、情绪爆发。"
+                else:
+                    focus = "容量极大、多线叙事、主角重大转变。"
+            pacing_guide += f"- 第{i}部（{label}）：分配 {chapters} 章。情节要求：{focus}\n"
         pacing_guide += f"</PACING_GUIDE>\n\n<ACT_PACING>\n"
         pacing_guide += f"- 总幕数：{total_acts} 幕\n"
         pacing_guide += f"- 平均每幕：约 {avg_chapters_per_act} 章\n"
@@ -2112,7 +2311,7 @@ class ContinuousPlanningService:
 5. 不要编造新的角色或地点，如果确实需要可标注"待定"但需说明原因"""
         return Prompt(system=system_msg, user=user_msg)
 
-    def _build_macro_planning_prompt(self, bible_context: Dict, target_chapters: int, structure_preference: Dict) -> Prompt:
+    def _build_macro_planning_prompt(self, bible_context: Dict, target_chapters: int, structure_preference: Dict, genre: str = "") -> Prompt:
         """构建宏观规划提示词（向后兼容的包装器）
 
         根据 structure_preference 是否为 None 来判断模式：
@@ -2121,7 +2320,7 @@ class ContinuousPlanningService:
         """
         if structure_preference is None:
             # 极速模式：使用默认的3×3×3结构
-            return self._build_quick_macro_prompt(bible_context, target_chapters)
+            return self._build_quick_macro_prompt(bible_context, target_chapters, genre)
         else:
             # 精密模式：使用用户指定的结构
             skeleton = self._build_precise_structure_skeleton(target_chapters, structure_preference)
@@ -2130,6 +2329,7 @@ class ContinuousPlanningService:
                 target_chapters,
                 structure_preference,
                 skeleton,
+                genre,
             )
 
     def _select_planning_template(self, genre: str, sub_genres: List[str]) -> tuple[str, Dict[str, str]]:
